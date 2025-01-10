@@ -165,6 +165,551 @@ t2h_eqos_set_mc_addr_list(struct rte_eth_dev *dev, struct rte_ether_addr *mac_ad
 	return 0;
 }
 
+static void
+t2h_eqos_set_mac(struct renesas_t2h_private *priv, bool enable)
+{
+	uint32_t value =
+		rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_CONFIG));
+	if (enable)
+		value |= T2H_EQOS_MAC_CONFIG_RE | T2H_EQOS_MAC_CONFIG_TE;
+	else
+		value &= ~(T2H_EQOS_MAC_CONFIG_RE | T2H_EQOS_MAC_CONFIG_TE);
+	rte_write32(rte_cpu_to_le_32(value), (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_CONFIG);
+}
+
+static int
+t2h_eqos_eth_configure(struct rte_eth_dev *dev)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+
+	if ((dev->data->dev_conf.rxmode.offloads & RTE_ETH_RX_OFFLOAD_CHECKSUM) ||
+	    (dev->data->dev_conf.rxmode.offloads & RTE_ETH_RX_OFFLOAD_IPV4_CKSUM) ||
+	    ((dev->data->dev_conf.rxmode.offloads & RTE_ETH_RX_OFFLOAD_UDP_CKSUM) ||
+	     (dev->data->dev_conf.rxmode.offloads & RTE_ETH_RX_OFFLOAD_TCP_CKSUM))) {
+		priv->flag_csum |= T2H_EQOS_MAC_CONFIG_IPC;
+	} else {
+		priv->flag_csum &= ~T2H_EQOS_MAC_CONFIG_IPC;
+	}
+
+	if (dev->data->dev_conf.rxmode.offloads & RTE_ETH_RX_OFFLOAD_KEEP_CRC) {
+		priv->flag_csum &= ~T2H_EQOS_MAC_CONFIG_CST;
+	} else {
+		priv->flag_csum |= T2H_EQOS_MAC_CONFIG_CST;
+	}
+	T2H_EQOS_PMD_DEBUG("flag_csum = 0x%x", priv->flag_csum);
+
+	return 0;
+}
+
+static int
+t2h_eqos_dma_reset(struct renesas_t2h_private *priv)
+{
+	uint32_t value = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_BUS_MODE));
+	T2H_EQOS_PMD_DEBUG("DMA Mode is 0x%x", value);
+
+	value |= T2H_EQOS_DMA_BUS_MODE_SWR;
+
+	rte_write32(rte_cpu_to_le_32(value),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_BUS_MODE);
+
+	/* Wait (at most) 1 seconds for DMA reset */
+	uint8_t try_counter = T2H_EQOS_DMA_RESET_TRY_COUNT;
+	while (try_counter) {
+		value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_BUS_MODE));
+		if (!(value & T2H_EQOS_DMA_BUS_MODE_SWR))
+			break;
+		try_counter--;
+		T2H_EQOS_UDELAY(T2H_EQOS_DMA_RESET_DELAY_TIME);
+	}
+
+	if (0 == try_counter) {
+		T2H_EQOS_PMD_WARN("DMA_Mode: the reset operation is not complete");
+		return -1;
+	}
+
+	value = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_BUS_MODE));
+	value &= ~T2H_EQOS_DMA_BUS_MODE_TAA;
+	value |= 2 << T2H_EQOS_DMA_BUS_MODE_TAA_SHIFT;
+	rte_write32(rte_cpu_to_le_32(value),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_BUS_MODE);
+	T2H_EQOS_PMD_DEBUG("DMA reset complete, DMA Mode is 0x%x", value);
+	return 0;
+}
+
+static void
+t2h_eqos_dma_init(struct renesas_t2h_private *priv)
+{
+	uint32_t value = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_SYS_BUS_MODE));
+	T2H_EQOS_PMD_DEBUG("System Bus Mode is 0x%x", value);
+
+	value |= T2H_EQOS_DMA_SYS_BUS_AAL;
+	rte_write32(rte_cpu_to_le_32(value),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_SYS_BUS_MODE);
+}
+
+static void
+t2h_eqos_core_init(struct renesas_t2h_private *priv)
+{
+	uint32_t value =
+		rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_CONFIG));
+	value |= T2H_EQOS_MAC_CORE_INIT;
+	value |= T2H_EQOS_MAC_CONFIG_TE;
+#if DEFAULT_SPEED == T2H_EQOS_SPEED_100
+	T2H_EQOS_PMD_DEBUG("Current speed is 100 ");
+	value |= T2H_EQOS_MAC_CONFIG_FES | T2H_EQOS_MAC_CONFIG_PS;
+#elif DEFAULT_SPEED == T2H_EQOS_SPEED_10
+	T2H_EQOS_PMD_DEBUG("Current speed is 10 ");
+	value |= T2H_EQOS_MAC_CONFIG_PS;
+#else
+	T2H_EQOS_PMD_DEBUG("Current speed is 1000 ");
+#endif
+
+	value |= T2H_EQOS_MAC_CONFIG_DM;
+	T2H_EQOS_PMD_DEBUG("value = 0x%x flag_csum = 0x%x", value, priv->flag_csum);
+	value |= priv->flag_csum;
+	rte_write32(rte_cpu_to_le_32(value), (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_CONFIG);
+}
+
+static void
+t2h_eqos_mac_enable_rx_queues(struct renesas_t2h_private *priv)
+{
+	uint32_t rxq_cnt = priv->rx_queues_to_use;
+	uint32_t queue;
+	uint32_t value;
+
+	for (queue = 0; queue < rxq_cnt; queue++) {
+		value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_RXQ_CTRL0));
+		value &= T2H_EQOS_RX_QUEUE_CLEAR(queue);
+		value |= T2H_EQOS_RX_DCB_QUEUE_ENABLE(queue);
+		rte_write32(rte_cpu_to_le_32(value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_RXQ_CTRL0);
+	}
+}
+
+static void
+t2h_eqos_rx_ipc_enable(struct renesas_t2h_private *priv)
+{
+	uint32_t value =
+		rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_CONFIG));
+	value |= T2H_EQOS_MAC_CONFIG_IPC;
+	rte_write32(rte_cpu_to_le_32(value), (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_CONFIG);
+}
+
+static void
+t2h_eqos_set_rings_length(struct renesas_t2h_private *priv, uint32_t rx_cnt, uint32_t tx_cnt)
+{
+	uint32_t queue;
+
+	/* set Transmit Descriptor Ring Length */
+	for (queue = 0; queue < tx_cnt; queue++) {
+		rte_write32(rte_cpu_to_le_32(priv->dma_tx_size - T2H_EQOS_DEF_QUEUE_SUB),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_TX_RING_LEN(queue));
+	}
+	/* set Receive Descriptor Ring Length */
+	for (queue = 0; queue < rx_cnt; queue++) {
+		rte_write32(rte_cpu_to_le_32(priv->dma_rx_size - T2H_EQOS_DEF_QUEUE_SUB),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_RX_RING_LEN(queue));
+	}
+}
+
+static void
+t2h_eqos_config_hw_tstamping(struct renesas_t2h_private *priv)
+{
+	uint32_t value = T2H_EQOS_PTP_TCR_TSENA;
+
+	rte_write32(rte_cpu_to_le_32(value),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_TIMESTAMP_CTRL);
+}
+
+static void
+t2h_eqos_start_all_dma(struct renesas_t2h_private *priv, uint32_t rx_dma_cnt, uint32_t tx_dma_count)
+{
+	uint32_t chan = 0;
+
+	/* start RX DMA channels */
+	for (chan = 0; chan < rx_dma_cnt; chan++) {
+		uint32_t rx_value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_RX_CTRL(chan)));
+		rx_value |= T2H_EQOS_DMA_CH_RX_CTRL_SR;
+		rte_write32(rte_cpu_to_le_32(rx_value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_RX_CTRL(chan));
+		rx_value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_CONFIG));
+		rx_value |= T2H_EQOS_MAC_CONFIG_RE;
+		rte_write32(rte_cpu_to_le_32(rx_value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_CONFIG);
+	}
+
+	/* start TX DMA channels */
+	for (chan = 0; chan < tx_dma_count; chan++) {
+		uint32_t tx_value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_TX_CTRL(chan)));
+		tx_value |= T2H_EQOS_DMA_CH_TX_CTRL_ST;
+		rte_write32(rte_cpu_to_le_32(tx_value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_TX_CTRL(chan));
+		tx_value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_CONFIG));
+		tx_value |= T2H_EQOS_MAC_CONFIG_TE;
+		rte_write32(rte_cpu_to_le_32(tx_value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_CONFIG);
+	}
+}
+
+static void
+t2h_eqos_stop_all_dma(struct renesas_t2h_private *priv, uint32_t rx_dma_cnt, uint32_t tx_dma_cnt)
+{
+	uint32_t chan = 0;
+
+	/* stop RX DMA channels */
+	for (chan = 0; chan < rx_dma_cnt; chan++) {
+		uint32_t rx_value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_RX_CTRL(chan)));
+		rx_value &= ~T2H_EQOS_DMA_CH_RX_CTRL_SR;
+		rte_write32(rte_cpu_to_le_32(rx_value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_RX_CTRL(chan));
+	}
+
+	/* stop RX DMA channels */
+	for (chan = 0; chan < tx_dma_cnt; chan++) {
+		uint32_t tx_value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_TX_CTRL(chan)));
+		tx_value &= ~T2H_EQOS_DMA_CH_TX_CTRL_ST;
+		rte_write32(rte_cpu_to_le_32(tx_value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_TX_CTRL(chan));
+		tx_value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_CONFIG));
+		tx_value &= ~T2H_EQOS_MAC_CONFIG_TE;
+		rte_write32(rte_cpu_to_le_32(tx_value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_CONFIG);
+	}
+}
+
+static void
+t2h_eqos_dma_axi(struct renesas_t2h_private *priv)
+{
+	uint32_t value = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_SYS_BUS_MODE));
+
+	value = (T2H_EQOS_AXI_WR_OSR_LMT << T2H_EQOS_DMA_AXI_WR_OSR_LMT_SHIFT) |
+		(T2H_EQOS_AXI_RD_OSR_LMT << T2H_EQOS_DMA_AXI_RD_OSR_LMT_SHIFT) |
+		T2H_EQOS_DMA_SYS_BUS_AAL | T2H_EQOS_DMA_AXI_BLEN16 | T2H_EQOS_DMA_AXI_BLEN8 |
+		T2H_EQOS_DMA_AXI_BLEN4;
+
+	rte_write32(rte_cpu_to_le_32(value),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_SYS_BUS_MODE);
+}
+
+static int
+t2h_qos_init_dma_engine(struct renesas_t2h_private *priv)
+{
+	uint32_t chan = 0;
+	int ret	      = 0;
+	struct t2h_eqos_priv_rx_q *rxq;
+	struct t2h_eqos_priv_tx_q *txq;
+
+	ret = t2h_eqos_dma_reset(priv);
+	if (ret) {
+		T2H_EQOS_PMD_ERR("Reset DMA Failed");
+		return ret;
+	}
+
+	/* 1US TIC Counter */
+	rte_write32(rte_cpu_to_le_32(T2H_EQOS_TIC_COUNTER),
+		    (uint8_t *)priv->hw_baseaddr_v + T2J_EQOS_MAC_1US_TIC_COUNTER);
+
+	/* Config DMA SysBus Mode */
+	t2h_eqos_dma_init(priv);
+
+	t2h_eqos_dma_axi(priv);
+
+	/* Config All DMA RX Channel */
+	for (chan = 0; chan < priv->rx_queues_to_use; chan++) {
+		rxq = priv->dev->data->rx_queues[chan];
+		t2h_eqos_init_rx_chan(priv, rxq);
+	}
+
+	/* Config All DMA TX Channel */
+	for (chan = 0; chan < priv->tx_queues_to_use; chan++) {
+		txq = priv->dev->data->tx_queues[chan];
+		t2h_eqos_init_tx_chan(priv, txq);
+	}
+
+	return ret;
+}
+
+static void
+configure_rx_flow_control(uint32_t rxq_size_val, uint32_t *rx_op_val)
+{
+	unsigned int rfd, rfa;
+
+	if (rxq_size_val == T2H_EQOS_QUEUE_SIZE_4K) {
+		rfd = T2H_EQOS_RFD_3;
+		rfa = T2H_EQOS_RFA_1;
+	} else {
+		rfd = T2H_EQOS_RFD_7;
+		rfa = T2H_EQOS_RFA_4;
+	}
+
+	*rx_op_val = (*rx_op_val & ~T2H_EQOS_MTL_OP_MODE_RFD_MASK) |
+		     (rfd << T2H_EQOS_MTL_OP_MODE_RFD_SHIFT);
+	*rx_op_val = (*rx_op_val & ~T2H_EQOS_MTL_OP_MODE_RFA_MASK) |
+		     (rfa << T2H_EQOS_MTL_OP_MODE_RFA_SHIFT);
+}
+
+static void
+t2h_eqos_dma_operation_mode(struct renesas_t2h_private *priv)
+{
+	uint32_t rx_dma_cnt = priv->rx_queues_to_use;
+	uint32_t tx_dma_cnt = priv->tx_queues_to_use;
+	uint32_t chan;
+	uint32_t mtl_rx_val, mtl_tx_val, value;
+	uint32_t rxq_size, txq_size;
+	unsigned int rqs, tqs;
+
+	rxq_size = priv->rx_fifo_size;
+	rxq_size /= rx_dma_cnt;
+	txq_size = priv->tx_fifo_size;
+	txq_size /= tx_dma_cnt;
+	rqs = rxq_size / T2H_EQOS_DEF_QUEUE_BYTE - T2H_EQOS_DEF_QUEUE_SUB;
+	tqs = txq_size / T2H_EQOS_DEF_QUEUE_BYTE - T2H_EQOS_DEF_QUEUE_SUB;
+	/* RX Operation Mode */
+	for (chan = 0; chan < rx_dma_cnt; chan++) {
+
+		mtl_rx_val = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+							 T2H_EQOS_MTL_CHAN_RX_OP_MODE(chan)));
+
+		mtl_rx_val |= T2H_EQOS_MTL_OP_MODE_RSF;
+		mtl_rx_val &= ~T2H_EQOS_MTL_OP_MODE_RQS_MASK;
+		mtl_rx_val |= rqs << T2H_EQOS_MTL_OP_MODE_RQS_SHIFT;
+		if (rxq_size >= T2H_EQOS_QUEUE_SIZE_4K) {
+			configure_rx_flow_control(rxq_size, &mtl_rx_val);
+		}
+		rte_write32(rte_cpu_to_le_32(mtl_rx_val),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MTL_CHAN_RX_OP_MODE(chan));
+
+		value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_RX_CTRL(chan)));
+		value &= ~T2H_EQOS_DMA_RBSZ_MASK;
+		value |= (priv->buf_size << T2H_EQOS_DMA_RBSZ_SHIFT) & T2H_EQOS_DMA_RBSZ_MASK;
+
+		rte_write32(rte_cpu_to_le_32(value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_RX_CTRL(chan));
+	}
+
+	/* TX Operation Mode */
+	for (chan = 0; chan < tx_dma_cnt; chan++) {
+		mtl_tx_val = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+							 T2H_EQOS_MTL_CHAN_TX_OP_MODE(chan)));
+
+		mtl_tx_val |= T2H_EQOS_MTL_OP_MODE_TSF;
+		mtl_tx_val &= ~T2H_EQOS_MTL_OP_MODE_TXQEN_MASK;
+		mtl_tx_val |= T2H_EQOS_MTL_OP_MODE_TXQEN;
+
+		mtl_tx_val &= ~T2H_EQOS_MTL_OP_MODE_TQS_MASK;
+		mtl_tx_val |= tqs << T2H_EQOS_MTL_OP_MODE_TQS_SHIFT;
+
+		rte_write32(rte_cpu_to_le_32(mtl_tx_val),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MTL_CHAN_TX_OP_MODE(chan));
+	}
+}
+static void
+t2h_eqos_enable_sph(struct renesas_t2h_private *priv, bool enable)
+{
+	uint32_t value = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_EXT_CONFIG));
+
+	value &= ~T2H_EQOS_MAC_CONFIG_HDSMS;
+	value |= T2H_EQOS_MAC_CONFIG_HDSMS_256;
+	rte_write32(rte_cpu_to_le_32(value),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_EXT_CONFIG);
+
+	for (uint32_t chan = 0; chan < priv->rx_queues_to_use; chan++) {
+		value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_CTRL(chan)));
+
+		if (enable)
+			value |= T2H_EQOS_DMA_CH_CTRL_SPH;
+		else
+			value &= ~T2H_EQOS_DMA_CH_CTRL_SPH;
+		rte_write32(rte_cpu_to_le_32(value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_CTRL(chan));
+	}
+}
+
+static int
+t2h_eqos_enable_tbs(struct renesas_t2h_private *priv, bool enable)
+{
+	for (uint32_t chan = 0; chan < priv->tx_queues_to_use; chan++) {
+		uint32_t value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_TX_CTRL(chan)));
+		if (enable)
+			value |= T2H_EQOS_DMA_CH_TX_CTRL_EDSE;
+		else
+			value &= ~T2H_EQOS_DMA_CH_TX_CTRL_EDSE;
+
+		rte_write32(rte_cpu_to_le_32(value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_TX_CTRL(chan));
+
+		value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_TX_CTRL(chan)));
+
+		if (enable && !(value & T2H_EQOS_DMA_CH_TX_CTRL_EDSE))
+			return -1;
+	}
+
+	rte_write32(rte_cpu_to_le_32(T2H_EQOS_DMA_TBS_DEF_FTOS),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_TBS_CTRL);
+
+	return 0;
+}
+
+static int
+t2h_eqos_hw_setup(struct renesas_t2h_private *priv)
+{
+	uint32_t rx_dma_cnt = priv->rx_queues_to_use;
+	uint32_t tx_dma_cnt = priv->tx_queues_to_use;
+	uint32_t chan       = 0;
+	int ret             = 0;
+	int i;
+
+	/* DMA Init*/
+	ret = t2h_qos_init_dma_engine(priv);
+	if (ret < 0) {
+		T2H_EQOS_PMD_ERR("DMA Init Failed");
+		return ret;
+	}
+
+	/* Init MAC Configuration */
+	t2h_eqos_core_init(priv);
+
+	/* Set each RXQ to Enable */
+	t2h_eqos_mac_enable_rx_queues(priv);
+
+	t2h_eqos_rx_ipc_enable(priv);
+
+	t2h_eqos_config_hw_tstamping(priv);
+
+	/* Enable Receiver and Transmitter */
+	t2h_eqos_set_mac(priv, true);
+
+	/* RX/TX Operation Mode Config */
+	t2h_eqos_dma_operation_mode(priv);
+
+	/* Convert the timer from msec to usec */
+	for (chan = 0; chan < rx_dma_cnt; chan++)
+		rte_write32(rte_cpu_to_le_32(T2H_EQOS_DEF_DMA_RWT),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_RX_WATCHDOG(chan));
+
+	/* set Transmit/Receive Descriptor Ring Length */
+	t2h_eqos_set_rings_length(priv, rx_dma_cnt, tx_dma_cnt);
+
+	t2h_eqos_enable_sph(priv, false);
+
+	t2h_eqos_enable_tbs(priv, false);
+
+	/* Start RX and TX DMA Channels */
+	t2h_eqos_start_all_dma(priv, rx_dma_cnt, tx_dma_cnt);
+
+	for (i = 1; i <= T2H_EQOS_MAX_ADDR; i++) {
+		rte_write32(0, (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_ADDR_HI(i));
+		rte_write32(0, (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_ADDR_LO(i));
+	}
+
+	return 0;
+}
+
+static int
+t2h_eqos_restart(struct rte_eth_dev *dev)
+{
+	int ret;
+	int bfsize                       = 0;
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+
+	priv->rx_queues_to_use = dev->data->nb_rx_queues;
+	priv->tx_queues_to_use = dev->data->nb_tx_queues;
+	if (unlikely(dev->data->mtu >= T2H_EQOS_BUF_SIZE_8KB))
+		bfsize = T2H_EQOS_BUF_SIZE_16KB;
+	if (bfsize < T2H_EQOS_BUF_SIZE_16KB) {
+		if (dev->data->mtu >= T2H_EQOS_BUF_SIZE_8KB)
+			bfsize = T2H_EQOS_BUF_SIZE_16KB;
+		else if (dev->data->mtu >= T2H_EQOS_BUF_SIZE_4KB)
+			bfsize = T2H_EQOS_BUF_SIZE_8KB;
+		else if (dev->data->mtu >= T2H_EQOS_BUF_SIZE_2KB)
+			bfsize = T2H_EQOS_BUF_SIZE_4KB;
+		else if (dev->data->mtu > T2H_EQOS_DEF_BUF_SIZE)
+			bfsize = T2H_EQOS_BUF_SIZE_2KB;
+		else
+			bfsize = T2H_EQOS_DEF_BUF_SIZE;
+	}
+	priv->buf_size = bfsize;
+
+	ret = t2h_eqos_hw_setup(priv);
+	if (ret < 0) {
+		T2H_EQOS_PMD_ERR("HW Set Up Failed");
+		return ret;
+	}
+
+	return 0;
+}
+
+static int
+t2h_eqos_eth_start(struct rte_eth_dev *dev)
+{
+	uint16_t i;
+	uint16_t rx_num = dev->data->nb_rx_queues;
+	uint16_t tx_num = dev->data->nb_tx_queues;
+	int ret         = 0;
+
+	ret = t2h_eqos_restart(dev);
+	if (ret < 0) {
+		return ret;
+	}
+
+	dev->rx_pkt_burst = &t2h_eqos_recv_pkts;
+	dev->tx_pkt_burst = &t2h_eqos_xmit_pkts;
+
+	for (i = 0; i < rx_num; i++)
+		dev->data->rx_queue_state[i] = RTE_ETH_QUEUE_STATE_STARTED;
+	for (i = 0; i < tx_num; i++)
+		dev->data->tx_queue_state[i] = RTE_ETH_QUEUE_STATE_STARTED;
+
+	return 0;
+}
+
+static void
+t2h_eqos_disable(struct renesas_t2h_private *priv, uint16_t rx_num, uint16_t tx_num)
+{
+	/* Stop RX and TX DMA Channels */
+	t2h_eqos_stop_all_dma(priv, rx_num, tx_num);
+
+	t2h_eqos_set_mac(priv, false);
+}
+
+static int
+t2h_eqos_eth_stop(struct rte_eth_dev *dev)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+	uint16_t i;
+	uint16_t rx_num = dev->data->nb_rx_queues;
+	uint16_t tx_num = dev->data->nb_tx_queues;
+
+	dev->data->dev_started = 0;
+
+	t2h_eqos_disable(priv, rx_num, tx_num);
+
+	for (i = 0; i < rx_num; i++)
+		dev->data->rx_queue_state[i] = RTE_ETH_QUEUE_STATE_STOPPED;
+	for (i = 0; i < tx_num; i++)
+		dev->data->tx_queue_state[i] = RTE_ETH_QUEUE_STATE_STOPPED;
+
+	return 0;
+}
+
 static int
 t2h_eqos_eth_close(struct rte_eth_dev *dev)
 {
@@ -670,7 +1215,41 @@ t2h_eqos_vlan_offload_set(struct rte_eth_dev *dev, int mask)
 	return 0;
 }
 
+static int
+t2h_eqos_mtu_set(struct rte_eth_dev *dev, uint16_t new_mtu)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+	int txq_sz			 = priv->tx_fifo_size;
+
+	T2H_EQOS_PMD_DEBUG("now mtu = %d", dev->data->mtu);
+	/* Is there a change in mtu setting */
+	if (dev->data->mtu == new_mtu) {
+		T2H_EQOS_PMD_INFO("There is no change in mtu setting");
+		return 0;
+	}
+
+	/* mtu setting is forbidden if port is start */
+	if (dev->data->dev_started != 0) {
+		T2H_EQOS_PMD_ERR("port %d must be stopped before configuration",
+				 dev->data->port_id);
+		return -EBUSY;
+	}
+
+	txq_sz /= priv->tx_queues_to_use;
+
+	if ((txq_sz < new_mtu) || (new_mtu > T2H_EQOS_BUF_SIZE_16KB))
+		return -EINVAL;
+
+	dev->data->mtu = new_mtu;
+	T2H_EQOS_PMD_DEBUG("new mtu = %d", dev->data->mtu);
+	return 0;
+}
+
 static const struct eth_dev_ops t2h_eqos_ops = {
+	.mtu_set		  = t2h_eqos_mtu_set,
+	.dev_configure		  = t2h_eqos_eth_configure,
+	.dev_start		  = t2h_eqos_eth_start,
+	.dev_stop		  = t2h_eqos_eth_stop,
 	.dev_close		  = t2h_eqos_eth_close,
 	.promiscuous_enable	  = t2h_eqos_promiscuous_enable,
 	.promiscuous_disable	  = t2h_eqos_promiscuous_disable,
