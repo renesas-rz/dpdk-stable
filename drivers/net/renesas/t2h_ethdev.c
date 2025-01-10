@@ -403,6 +403,273 @@ t2h_eqos_allmulticast_disable(struct rte_eth_dev *dev)
 	return 0;
 }
 
+static int
+t2h_eqos_update_vlan_hash(struct renesas_t2h_private *priv, uint32_t hash, uint16_t p_match_val)
+{
+	uint32_t value;
+
+	rte_write32(rte_cpu_to_le_32(hash),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_HASH_TABLE);
+
+	value = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_TAG));
+
+	if (hash) {
+		value |= T2H_EQOS_MAC_VLAN_TAG_VTHM | T2H_EQOS_MAC_VLAN_TAG_ETV;
+	} else {
+		if (p_match_val) {
+			value = T2H_EQOS_MAC_VLAN_TAG_ETV;
+		} else {
+			value &= ~(T2H_EQOS_MAC_VLAN_TAG_VTHM | T2H_EQOS_MAC_VLAN_TAG_ETV);
+			value &= ~(T2H_EQOS_MAC_VLAN_TAG_EDVLP | T2H_EQOS_MAC_VLAN_TAG_ESVL);
+			value &= ~T2H_EQOS_MAC_VLAN_TAG_DOVLTC;
+			value &= ~T2H_EQOS_MAC_VLAN_TAG_VID;
+		}
+	}
+	rte_write32(rte_cpu_to_le_32(value),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_TAG);
+
+	return 0;
+}
+
+static int
+t2h_eqos_vlan_update(struct renesas_t2h_private *priv)
+{
+	uint32_t crc, hash = 0;
+	uint16_t per_match = 0;
+	uint16_t vid, v_mid;
+	int cnt = 0;
+	unsigned long vid_idx, vid_valid;
+
+	/* Generate the VLAN Hash Table value */
+	for (vid = 0; vid < T2H_EQOS_VLAN_N_VID; vid++) {
+		vid_idx	  = T2H_EQOS_VLAN_TABLE_IDX(vid);
+		vid_valid = priv->config_vlans[vid_idx];
+		v_mid	  = (vid - (T2H_EQOS_VLANID_HASHTAV_MAX * vid_idx));
+		vid_valid = (unsigned long)vid_valid >> v_mid;
+		if (vid_valid & T2H_EQOS_VLANID_VALID) {
+			T2H_EQOS_PMD_INFO("vid:%d vid_valid :%lu pdata->config_vlans[%ld]=0x%lx",
+					  vid, vid_valid, vid_idx, priv->config_vlans[vid_idx]);
+		} else {
+			continue;
+		}
+
+		uint16_t vid_le = rte_cpu_to_le_16(vid);
+		crc = t2h_eqos_bitrev32(~t2h_eqos_vid_crc32_le(vid_le)) >> T2H_EQOS_VLANID_CRC_MASK;
+		hash |= (T2H_EQOS_VLANID_MASK << crc);
+		cnt++;
+		T2H_EQOS_PMD_DEBUG("vid:%d vid_idx:%ld vid_le:%d crc:%d hash:%d", vid, vid_idx,
+				   vid_le, crc, hash);
+	}
+
+	if (!priv->vlhash) {
+		if (cnt > T2H_EQOS_VLANID_DIS_COUNT)
+			return -EOPNOTSUPP;
+		per_match = rte_cpu_to_le_16(vid);
+		hash	  = 0;
+	}
+
+	return t2h_eqos_update_vlan_hash(priv, hash, per_match);
+}
+
+static int
+t2h_eqos_add_hw_vlan_rx_fltr(struct renesas_t2h_private *priv, uint16_t vlan_id)
+{
+	int index    = -1, ret;
+	uint32_t val = 0;
+	uint32_t i;
+
+	if (vlan_id > T2H_EQOS_VLANID_MAX) {
+		return -EINVAL;
+	}
+
+	/* Only one VLAN */
+	if (priv->vlan_num == 1) {
+		/* Promiscuous Mode not set */
+		if (vlan_id == T2H_EQOS_VLANID_ZERO) {
+			T2H_EQOS_PMD_WARN("Adding VLAN ID 0 is not supported");
+			return -EPERM;
+		}
+
+		if (priv->filter_set[0] & T2H_EQOS_MAC_VLAN_TAG_VID) {
+			T2H_EQOS_PMD_ERR("Only single VLAN ID supported");
+			return -EPERM;
+		}
+
+		priv->filter_set[0] = vlan_id;
+		t2h_eqos_write_single_vlan(priv, vlan_id);
+		return 0;
+	}
+
+	val |= T2H_EQOS_MAC_VLAN_TAG_DATA_ETV | T2H_EQOS_MAC_VLAN_TAG_DATA_VEN | vlan_id;
+	T2H_EQOS_PMD_DEBUG("vlan_num == %d val = 0x%x", priv->vlan_num, val);
+	for (i = 0; i < priv->vlan_num; i++) {
+		if (priv->filter_set[i] == val)
+			return 0;
+		else if (!(priv->filter_set[i] & T2H_EQOS_MAC_VLAN_TAG_DATA_VEN))
+			index = i;
+	}
+
+	if (index == -1) {
+		T2H_EQOS_PMD_ERR("MAC_VLAN_Tag_Filter is full size = %u", priv->vlan_num);
+		return -EPERM;
+	}
+	T2H_EQOS_PMD_DEBUG("index = %d", index);
+	ret = t2h_eqos_write_vlan_filter(priv, index, val);
+
+	if (!ret)
+		priv->filter_set[index] = val;
+
+	return ret;
+}
+
+static int
+t2h_eqos_vlan_rx_add_vid(struct renesas_t2h_private *priv, uint16_t vlan_id)
+{
+	int ret;
+	unsigned long vid_bit, vid_idx;
+
+	vid_bit = T2H_EQOS_VLAN_TABLE_BIT(vlan_id);
+	vid_idx = T2H_EQOS_VLAN_TABLE_IDX(vlan_id);
+
+	priv->config_vlans[vid_idx] |= vid_bit;
+
+	ret = t2h_eqos_vlan_update(priv);
+	if (ret) {
+		priv->config_vlans[vid_idx] &= ~vid_bit;
+		T2H_EQOS_PMD_ERR("t2h_eqos_vlan_update error: %d", ret);
+		return ret;
+	}
+
+	if (priv->vlan_num) {
+		ret = t2h_eqos_add_hw_vlan_rx_fltr(priv, vlan_id);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static int
+t2h_eqos_del_hw_vlan_rx_fltr(struct renesas_t2h_private *priv, uint16_t vid)
+{
+	int ret	   = 0;
+	uint32_t i = 0;
+
+	/* Only one Vlan */
+	if (priv->vlan_num == 1) {
+		if ((priv->filter_set[0] & T2H_EQOS_MAC_VLAN_TAG_VID) == vid) {
+			priv->filter_set[0] = 0;
+			t2h_eqos_write_single_vlan(priv, 0);
+		}
+		return 0;
+	}
+
+	for (i = 0; i < priv->vlan_num; i++) {
+		if ((priv->filter_set[i] & T2H_EQOS_MAC_VLAN_TAG_DATA_VID) == vid) {
+			ret = t2h_eqos_write_vlan_filter(priv, i, 0);
+
+			if (!ret)
+				priv->filter_set[i] = 0;
+			else
+				return ret;
+		}
+	}
+
+	return ret;
+}
+
+static int
+t2h_eqos_vlan_rx_kill_vid(struct renesas_t2h_private *priv, uint16_t vlan_id)
+{
+	int ret;
+	unsigned long vid_bit, vid_idx;
+
+	vid_bit = T2H_EQOS_VLAN_TABLE_BIT(vlan_id);
+	vid_idx = T2H_EQOS_VLAN_TABLE_IDX(vlan_id);
+	priv->config_vlans[vid_idx] &= ~vid_bit;
+
+	if (priv->vlan_num) {
+		ret = t2h_eqos_del_hw_vlan_rx_fltr(priv, vlan_id);
+		if (ret)
+			return ret;
+	}
+	ret = t2h_eqos_vlan_update(priv);
+
+	return ret;
+}
+
+static int
+t2h_eqos_vlan_filter_set(struct rte_eth_dev *dev, uint16_t vlan_id, int on)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+	int err;
+
+	if (on) {
+		err = t2h_eqos_vlan_rx_add_vid(priv, vlan_id);
+	} else {
+		err = t2h_eqos_vlan_rx_kill_vid(priv, vlan_id);
+	}
+
+	return err;
+}
+
+static void
+t2h_eqos_vlan_filter_enable(struct rte_eth_dev *dev)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+	uint32_t value, filter_value;
+
+	filter_value = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_PACKET_FILTER));
+	filter_value |= T2H_EQOS_MAC_PACKET_FILTER_VTFE;
+	rte_write32(rte_cpu_to_le_32(filter_value),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_PACKET_FILTER);
+
+	value = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_TAG));
+	value |= T2H_EQOS_MAC_VLAN_TAG_VTHM | T2H_EQOS_MAC_VLAN_TAG_ETV;
+	rte_write32(rte_cpu_to_le_32(value),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_TAG);
+
+}
+
+static void
+t2h_eqos_vlan_filter_disable(struct rte_eth_dev *dev)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+	uint32_t value, filter_value;
+
+	filter_value = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_PACKET_FILTER));
+	filter_value &= ~T2H_EQOS_MAC_PACKET_FILTER_VTFE;
+	rte_write32(rte_cpu_to_le_32(filter_value),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_PACKET_FILTER);
+
+	value = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_TAG));
+	value &= ~(T2H_EQOS_MAC_VLAN_TAG_VTHM | T2H_EQOS_MAC_VLAN_TAG_ETV);
+	rte_write32(rte_cpu_to_le_32(value),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_TAG);
+}
+
+static int
+t2h_eqos_vlan_offload_set(struct rte_eth_dev *dev, int mask)
+{
+	struct rte_eth_rxmode *rxmode;
+
+	rxmode = &dev->data->dev_conf.rxmode;
+	if (mask & RTE_ETH_VLAN_FILTER_MASK) {
+		if (rxmode->offloads & RTE_ETH_RX_OFFLOAD_VLAN_FILTER) {
+			t2h_eqos_vlan_filter_enable(dev);
+		} else {
+			t2h_eqos_vlan_filter_disable(dev);
+		}
+	}
+
+	return 0;
+}
+
 static const struct eth_dev_ops t2h_eqos_ops = {
 	.dev_close		  = t2h_eqos_eth_close,
 	.promiscuous_enable	  = t2h_eqos_promiscuous_enable,
@@ -412,7 +679,9 @@ static const struct eth_dev_ops t2h_eqos_ops = {
 	.mac_addr_set		  = t2h_eqos_set_mac_addr,
 	.mac_addr_add		  = t2h_eqos_add_mac_addr,
 	.mac_addr_remove	  = t2h_eqos_remove_mac_addr,
-	.set_mc_addr_list	  = t2h_eqos_set_mc_addr_list};
+	.set_mc_addr_list	  = t2h_eqos_set_mc_addr_list,
+	.vlan_filter_set	  = t2h_eqos_vlan_filter_set,
+	.vlan_offload_set	  = t2h_eqos_vlan_offload_set};
 
 static int
 t2h_eqos_eth_init(struct rte_eth_dev *dev)
