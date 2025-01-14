@@ -178,6 +178,85 @@ t2h_eqos_set_mac(struct renesas_t2h_private *priv, bool enable)
 }
 
 static int
+t2h_eqos_eth_link_update(struct rte_eth_dev *dev, int wait_to_complete __rte_unused)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+	struct rte_eth_link link;
+
+	memset(&link, 0, sizeof(struct rte_eth_link));
+	/* get the link status before link update, for predicting later */
+	rte_eth_linkstatus_get(dev, &link);
+
+	uint32_t lpi_ctrl_status = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_LPI_CTRL_STATUS));
+
+	uint32_t value =
+		rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_CONFIG));
+	if (value & T2H_EQOS_MAC_CONFIG_PS) {
+		if (value & T2H_EQOS_MAC_CONFIG_FES) {
+			link.link_speed = RTE_ETH_SPEED_NUM_100M;
+		} else {
+			link.link_speed = RTE_ETH_SPEED_NUM_10M;
+		}
+	} else {
+		if (!(value & T2H_EQOS_MAC_CONFIG_FES)) {
+			link.link_speed = RTE_ETH_SPEED_NUM_1G;
+		} else {
+			T2H_EQOS_PMD_ERR("Speed Set Error");
+		}
+	}
+
+	if (value & T2H_EQOS_MAC_CONFIG_DM) {
+		link.link_duplex = RTE_ETH_LINK_FULL_DUPLEX;
+	} else {
+		link.link_duplex = RTE_ETH_LINK_HALF_DUPLEX;
+	}
+
+	if (lpi_ctrl_status & T2H_EQOS_MAC_LPI_CTRL_STATUS_PLS) {
+		T2H_EQOS_PMD_INFO("RTE_ETH_LINK_UP");
+		link.link_status = RTE_ETH_LINK_UP;
+	} else {
+		T2H_EQOS_PMD_INFO("RTE_ETH_LINK_DOWN");
+		link.link_status = RTE_ETH_LINK_DOWN;
+	}
+
+	rte_eth_linkstatus_set(dev, &link);
+
+	return 0;
+}
+
+static void
+t2h_eqos_dev_intr_handler(void *param)
+{
+	struct rte_eth_dev *dev		 = (struct rte_eth_dev *)param;
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+	struct rte_intr_handle *intr_handle;
+
+	intr_handle = dev->intr_handle;
+
+	if (rte_intr_fd_get(intr_handle) < 0) {
+		T2H_EQOS_PMD_ERR("Failed to get intr handle");
+		return;
+	}
+
+	uint32_t dma_intr_status = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_STATUS(0)));
+
+	uint32_t dma_intr_en = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_INTR_ENA(0)));
+
+	rte_write32(rte_cpu_to_le_32(dma_intr_status & dma_intr_en),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_STATUS(0));
+
+	if (dev->data->dev_conf.intr_conf.lsc != 0) {
+		t2h_eqos_eth_link_update(dev, 0);
+		rte_eth_dev_callback_process(dev, RTE_ETH_EVENT_INTR_LSC, NULL);
+	}
+
+	rte_intr_ack(intr_handle);
+}
+
+static int
 t2h_eqos_eth_configure(struct rte_eth_dev *dev)
 {
 	struct renesas_t2h_private *priv = dev->data->dev_private;
@@ -624,6 +703,88 @@ t2h_eqos_hw_setup(struct renesas_t2h_private *priv)
 }
 
 static int
+t2h_eqos_enable_interrupts(struct rte_eth_dev *dev)
+{
+	struct renesas_t2h_private *priv    = dev->data->dev_private;
+	int ret;
+	struct rte_intr_handle *intr_handle = dev->intr_handle;
+	uint32_t dma_csr_ch                 = max(priv->rx_queues_to_use, priv->tx_queues_to_use);
+	uint32_t value                      = 0;
+
+	/* if the interrupts were configured on this devices */
+	if (intr_handle && rte_intr_fd_get(intr_handle)) {
+		if (dev->data->dev_conf.intr_conf.lsc != 0) {
+			/* register a callback handler with UIO for interrupt notifications */
+			ret = rte_intr_callback_register(intr_handle, t2h_eqos_dev_intr_handler,
+							 (void *)dev);
+			if (ret < 0) {
+				T2H_EQOS_PMD_ERR(
+					"Failed to register UIO interrupt callback, ret=%d", ret);
+				return ret;
+			}
+		}
+
+		/* enable UIO interrupt handling */
+		ret = rte_intr_enable(intr_handle);
+		if (ret < 0) {
+			T2H_EQOS_PMD_ERR("Failed to enable UIO interrupts, ret=%d", ret);
+			if (dev->data->dev_conf.intr_conf.lsc != 0) {
+				rte_intr_callback_unregister(intr_handle, t2h_eqos_dev_intr_handler,
+							     (void *)dev);
+			}
+			dev->data->dev_conf.intr_conf.lsc = 0;
+			dev->data->dev_flags &= ~RTE_ETH_DEV_INTR_LSC;
+			return ret;
+		}
+	}
+
+	value = T2H_EQOS_MAC_INT_DEF_ENABLE;
+
+	rte_write32(rte_cpu_to_le_32(value), (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_INT_EN);
+
+	/* Disable all DMA IRQ */
+	for (uint32_t chan = 0; chan < dma_csr_ch; chan++) {
+		rte_write32(0, (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_INTR_ENA(chan));
+	}
+
+	return ret;
+}
+
+static int
+t2h_eqos_disable_interrupts(struct rte_eth_dev *dev)
+{
+	struct renesas_t2h_private *priv    = dev->data->dev_private;
+	int ret;
+	struct rte_intr_handle *intr_handle = dev->intr_handle;
+	uint32_t dma_csr_ch                 = max(priv->rx_queues_to_use, priv->tx_queues_to_use);
+
+	/* inform the device that all interrupts are disabled */
+	for (uint32_t chan = 0; chan < dma_csr_ch; chan++) {
+		rte_write32(rte_cpu_to_le_32(T2H_EQOS_DMA_CH_INTR_ENA_NO_INTRS),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_INTR_ENA(chan));
+	}
+
+	if (intr_handle && rte_intr_fd_get(intr_handle)) {
+		/* disable uio intr before callback unregister */
+		ret = rte_intr_disable(intr_handle);
+		if (ret < 0) {
+			T2H_EQOS_PMD_WARN("Failed to disable UIO interrupts, ret=%d", ret);
+		}
+
+		if (dev->data->dev_conf.intr_conf.lsc != 0) {
+			ret = rte_intr_callback_unregister(intr_handle, t2h_eqos_dev_intr_handler,
+							   (void *)dev);
+			if (ret < 0) {
+				T2H_EQOS_PMD_WARN(
+					"Failed to unregister UIO interrupt callback, ret=%d", ret);
+			}
+		}
+	}
+
+	return 0;
+}
+
+static int
 t2h_eqos_restart(struct rte_eth_dev *dev)
 {
 	int ret;
@@ -653,6 +814,8 @@ t2h_eqos_restart(struct rte_eth_dev *dev)
 		T2H_EQOS_PMD_ERR("HW Set Up Failed");
 		return ret;
 	}
+
+	t2h_eqos_enable_interrupts(dev);
 
 	return 0;
 }
@@ -714,6 +877,8 @@ static int
 t2h_eqos_eth_close(struct rte_eth_dev *dev)
 {
 	struct renesas_t2h_private *priv = dev->data->dev_private;
+
+	t2h_eqos_disable_interrupts(dev);
 
 	t2h_eqos_uio_cleanup(priv);
 
@@ -1260,7 +1425,8 @@ static const struct eth_dev_ops t2h_eqos_ops = {
 	.mac_addr_remove	  = t2h_eqos_remove_mac_addr,
 	.set_mc_addr_list	  = t2h_eqos_set_mc_addr_list,
 	.vlan_filter_set	  = t2h_eqos_vlan_filter_set,
-	.vlan_offload_set	  = t2h_eqos_vlan_offload_set};
+	.vlan_offload_set	  = t2h_eqos_vlan_offload_set,
+	.link_update		  = t2h_eqos_eth_link_update};
 
 static int
 t2h_eqos_eth_init(struct rte_eth_dev *dev)
