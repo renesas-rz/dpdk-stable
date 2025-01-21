@@ -12,6 +12,7 @@
 #include "t2h_ethdev.h"
 #include "t2h_regs.h"
 #include "t2h_uio.h"
+#include "t2h_rxtx.h"
 #include "t2h_util.h"
 
 #define T2H_EQOS_NAME_PMD	  net_renesas
@@ -879,6 +880,7 @@ t2h_eqos_eth_close(struct rte_eth_dev *dev)
 	struct renesas_t2h_private *priv = dev->data->dev_private;
 
 	t2h_eqos_disable_interrupts(dev);
+	t2h_eqos_free_all_queues(dev);
 
 	t2h_eqos_uio_cleanup(priv);
 
@@ -1416,6 +1418,10 @@ static const struct eth_dev_ops t2h_eqos_ops = {
 	.dev_start		  = t2h_eqos_eth_start,
 	.dev_stop		  = t2h_eqos_eth_stop,
 	.dev_close		  = t2h_eqos_eth_close,
+	.rx_queue_setup		  = t2h_eqos_rx_queue_setup,
+	.rx_queue_release	  = t2h_eqos_rx_queue_release,
+	.tx_queue_setup		  = t2h_eqos_tx_queue_setup,
+	.tx_queue_release	  = t2h_eqos_tx_queue_release,
 	.promiscuous_enable	  = t2h_eqos_promiscuous_enable,
 	.promiscuous_disable	  = t2h_eqos_promiscuous_disable,
 	.allmulticast_enable	  = t2h_eqos_multicast_enable,
