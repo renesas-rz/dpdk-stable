@@ -69,6 +69,102 @@ t2h_eqos_get_mac_addr(struct renesas_t2h_private *priv, struct rte_ether_addr *a
 	addr->addr_bytes[5] = (mac_addr_hi >> T2H_EQOS_MAC_HIGH_EIGHT) & T2H_EQOS_FULL_MASK;
 }
 
+static void
+t2h_eqos_set_mac_addn_addr(struct renesas_t2h_private *priv, uint8_t *addr, uint32_t index)
+{
+	uint32_t mac_addr_hi = 0, mac_addr_lo = 0;
+
+	if (addr) {
+		mac_addr_lo = addr[3] << T2H_EQOS_MAC_LOW_TWENTY_FOUR |
+			      (addr[2] << T2H_EQOS_MAC_LOW_SIXTEEN) |
+			      (addr[1] << T2H_EQOS_MAC_LOW_EIGHT) | (addr[0]);
+
+		mac_addr_hi = (addr[5] << T2H_EQOS_MAC_HIGH_EIGHT) | addr[4];
+		mac_addr_hi |= (T2H_EQOS_CHAN0 << T2H_EQOS_MAC_HI_DCS_SHIFT);
+		mac_addr_hi |= T2H_EQOS_MAC_ADDR0_HI;
+	}
+
+	T2H_EQOS_PMD_INFO("%s mac address at %#x", addr ? "set" : "clear", index);
+
+	rte_write32(rte_cpu_to_le_32(mac_addr_hi),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_ADDR_HI(index));
+	rte_write32(rte_cpu_to_le_32(mac_addr_lo),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_ADDR_LO(index));
+}
+
+static int
+t2h_eqos_add_mac_addr(struct rte_eth_dev *dev, struct rte_ether_addr *mac_addr, uint32_t index,
+		      uint32_t pool __rte_unused)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+
+	if (index > T2H_EQOS_MAX_ADDR) {
+		T2H_EQOS_PMD_ERR("Invalid Index %d", index);
+		return -EINVAL;
+	}
+
+	t2h_eqos_set_mac_addn_addr(priv, (uint8_t *)mac_addr, index);
+	rte_ether_addr_copy(mac_addr, &dev->data->mac_addrs[index]);
+
+	return 0;
+}
+
+static void
+t2h_eqos_remove_mac_addr(struct rte_eth_dev *dev, uint32_t index)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+
+	if (index > T2H_EQOS_MAX_ADDR) {
+		T2H_EQOS_PMD_ERR("Invalid Index %d", index);
+		return;
+	}
+
+	t2h_eqos_set_mac_addn_addr(priv, NULL, index);
+	memset(&dev->data->mac_addrs[index], 0, sizeof(struct rte_ether_addr));
+}
+
+static int
+t2h_eqos_set_mc_addr_list(struct rte_eth_dev *dev, struct rte_ether_addr *mac_addr_list,
+			  uint32_t nb_mac_addr)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+	uint32_t index			 = 0;
+	struct rte_ether_addr *addr;
+
+	if (nb_mac_addr > T2H_EQOS_MAX_ADDR) {
+		T2H_EQOS_PMD_ERR("Invalid Index %d", nb_mac_addr);
+		return -EINVAL;
+	}
+
+	/* Validate the given addresses first */
+	for (index = 0; index < nb_mac_addr && mac_addr_list != NULL; index++) {
+		addr = &mac_addr_list[index];
+		if (!rte_is_multicast_ether_addr(addr) || rte_is_broadcast_ether_addr(addr)) {
+			char mac_str[RTE_ETHER_ADDR_FMT_SIZE];
+			rte_ether_format_addr(mac_str, RTE_ETHER_ADDR_FMT_SIZE, addr);
+			T2H_EQOS_PMD_ERR(" invalid multicast address %s", mac_str);
+			return -EINVAL;
+		}
+	}
+
+	/* clear addresses */
+	for (index = 1; index < T2H_EQOS_MAX_ADDR; index++) {
+		if (nb_mac_addr) {
+			t2h_eqos_set_mac_addn_addr(priv, (uint8_t *)mac_addr_list, index);
+			rte_ether_addr_copy(mac_addr_list, &dev->data->mac_addrs[index]);
+			mac_addr_list++;
+			nb_mac_addr--;
+		} else {
+			if (rte_is_zero_ether_addr(&dev->data->mac_addrs[index]))
+				continue;
+			t2h_eqos_set_mac_addn_addr(priv, NULL, index);
+			memset(&dev->data->mac_addrs[index], 0, sizeof(struct rte_ether_addr));
+		}
+	}
+
+	return 0;
+}
+
 static int
 t2h_eqos_eth_close(struct rte_eth_dev *dev)
 {
@@ -83,9 +179,240 @@ t2h_eqos_eth_close(struct rte_eth_dev *dev)
 	return 0;
 }
 
+static void
+t2h_eqos_write_single_vlan(struct renesas_t2h_private *priv, uint16_t vid)
+{
+	uint32_t val;
+
+	val = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_TAG));
+	val &= ~T2H_EQOS_MAC_VLAN_TAG_VID;
+	val |= T2H_EQOS_MAC_VLAN_TAG_ETV | vid;
+
+	rte_write32(rte_cpu_to_le_32(val), (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_TAG);
+}
+
+static int
+t2h_eqos_write_vlan_filter(struct renesas_t2h_private *priv, uint8_t idx, uint32_t data)
+{
+	int i, try_counter = T2H_EQOS_VLAN_TIMEOUT_CNT;
+	uint32_t val;
+
+	if (idx >= priv->vlan_num)
+		return -EINVAL;
+
+	rte_write32(rte_cpu_to_le_32(data),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_TAG_DATA);
+
+	val = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_TAG));
+	val &= ~(T2H_EQOS_MAC_VLAN_TAG_OFS_MASK | T2H_EQOS_MAC_VLAN_TAG_CT |
+		 T2H_EQOS_MAC_VLAN_TAG_OB);
+	val |= (idx << T2H_EQOS_MAC_VLAN_TAG_OFS_SHIFT) | T2H_EQOS_MAC_VLAN_TAG_OB;
+	rte_write32(rte_cpu_to_le_32(val), (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_TAG);
+
+	while (try_counter) {
+		val = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_TAG));
+		if (!(val & T2H_EQOS_MAC_VLAN_TAG_OB))
+			return 0;
+		try_counter--;
+		T2H_EQOS_UDELAY(T2H_EQOS_VLAN_DELAY_TIME);
+	}
+	T2H_EQOS_PMD_WARN("Register MAC_VLAN_Tag_Silter processing timeout");
+	return -EBUSY;
+}
+
+static int
+t2h_eqos_vlan_promisc_enable(struct renesas_t2h_private *priv)
+{
+	uint32_t value;
+	uint32_t hash_val;
+	int i;
+	int ret;
+
+	/* Only one VLAN */
+	if (priv->vlan_num == 1) {
+		t2h_eqos_write_single_vlan(priv, 0);
+		return 0;
+	}
+
+	for (i = 0; i < priv->vlan_num; i++) {
+		if (priv->filter_set[i] & T2H_EQOS_MAC_VLAN_TAG_DATA_VEN) {
+			value = priv->filter_set[i] & ~T2H_EQOS_MAC_VLAN_TAG_DATA_VEN;
+			ret = t2h_eqos_write_vlan_filter(priv, i, value);
+			if (ret) {
+				T2H_EQOS_PMD_ERR("Failed Write Vlan Filter");
+				return ret;
+			}
+		}
+	}
+
+	hash_val = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_HASH_TABLE));
+	if (hash_val & T2H_EQOS_MAC_VLAN_VLHT) {
+		value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_TAG));
+		if (value & T2H_EQOS_MAC_VLAN_TAG_VTHM) {
+			value &= ~T2H_EQOS_MAC_VLAN_TAG_VTHM;
+			rte_write32(rte_cpu_to_le_32(value),
+				    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_TAG);
+		}
+	}
+
+	return 0;
+}
+
+static int
+t2h_eqos_restore_hw_vlan_rx_fltr(struct renesas_t2h_private *priv)
+{
+	uint32_t value;
+	uint32_t hash_val;
+	int i;
+	int ret;
+
+	/* Only one VLAN */
+	if (priv->vlan_num == 1) {
+		t2h_eqos_write_single_vlan(priv, priv->filter_set[0]);
+		return 0;
+	}
+
+	for (i = 0; i < priv->vlan_num; i++) {
+		if (priv->filter_set[i] & T2H_EQOS_MAC_VLAN_TAG_DATA_VEN) {
+			value = priv->filter_set[i];
+			ret = t2h_eqos_write_vlan_filter(priv, i, value);
+			if (ret) {
+				T2H_EQOS_PMD_ERR("Failed Write Vlan Filter");
+				return ret;
+			}
+		}
+	}
+
+	hash_val = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_HASH_TABLE));
+	if (hash_val & T2H_EQOS_MAC_VLAN_VLHT) {
+		value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_TAG));
+		value |= T2H_EQOS_MAC_VLAN_TAG_VTHM;
+		rte_write32(rte_cpu_to_le_32(value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_VLAN_TAG);
+	}
+
+	return 0;
+}
+
+static int
+t2h_eqos_promiscuous_enable(struct rte_eth_dev *dev)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+	uint32_t value;
+	int ret;
+
+	value = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_PACKET_FILTER));
+	value |= T2H_EQOS_MAC_PACKET_FILTER_PR;
+	T2H_EQOS_PMD_DEBUG("The current MAC_Packet_Filter is 0x%x", value);
+	rte_write32(rte_cpu_to_le_32(value),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_PACKET_FILTER);
+	if (!priv->promisc) {
+		priv->promisc = T2H_EQOS_PROMISC_ON;
+		ret = t2h_eqos_vlan_promisc_enable(priv);
+		if (ret < 0) {
+			T2H_EQOS_PMD_ERR("Promiscuous Enable Write Failed");
+			return ret;
+		}
+	}
+
+	return 0;
+}
+
+static int
+t2h_eqos_promiscuous_disable(struct rte_eth_dev *dev)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+	uint32_t value;
+	int ret;
+
+	value = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_PACKET_FILTER));
+	value &= ~T2H_EQOS_MAC_PACKET_FILTER_PR;
+	T2H_EQOS_PMD_DEBUG("The current MAC_Packet_Filter is 0x%x", value);
+	rte_write32(rte_cpu_to_le_32(value),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_PACKET_FILTER);
+	if (priv->promisc) {
+		priv->promisc = T2H_EQOS_PROMISC_OFF;
+		ret = t2h_eqos_restore_hw_vlan_rx_fltr(priv);
+		if (ret < 0) {
+			T2H_EQOS_PMD_ERR("Promiscuous Disable Write Failed");
+			return ret;
+		}
+	}
+
+	return 0;
+}
+
+static int
+t2h_eqos_multicast_enable(struct rte_eth_dev *dev)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+	uint32_t value;
+	uint32_t filters[8];
+	int hash_regs_cnt = BIT(priv->hash_tb_sz);
+
+	value = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_PACKET_FILTER));
+
+	/* Pass All Multicast is enabled */
+	value |= T2H_EQOS_MAC_PACKET_FILTER_PM;
+	T2H_EQOS_PMD_DEBUG("The current MAC_Packet_Filter is 0x%x", value);
+	rte_write32(rte_cpu_to_le_32(value),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_PACKET_FILTER);
+	dev->data->all_multicast = T2H_EQOS_MULTICAST_ON;
+
+	/* Enable All HASH Table */
+	memset(filters, T2H_EQOS_FULL_MASK, sizeof(filters));
+	for (int i = 0; i < hash_regs_cnt; i++)
+		rte_write32(rte_cpu_to_le_32(filters[i]),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_HASH_TAB(i));
+
+	return 0;
+}
+
+static int
+t2h_eqos_allmulticast_disable(struct rte_eth_dev *dev)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+	uint32_t value;
+	uint32_t filters[8];
+	int hash_regs_cnt = BIT(priv->hash_tb_sz);
+
+	value = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_PACKET_FILTER));
+
+	/* Pass All Multicast is Disable */
+	value &= ~T2H_EQOS_MAC_PACKET_FILTER_PM;
+	T2H_EQOS_PMD_DEBUG("The current MAC_Packet_Filter is 0x%x", value);
+	/* Disable All Hash Table */
+	memset(filters, T2H_EQOS_EMPTY_MASK, sizeof(filters));
+	rte_write32(rte_cpu_to_le_32(value),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_PACKET_FILTER);
+	dev->data->all_multicast = T2H_EQOS_MULTICAST_OFF;
+
+	for (int i = 0; i < hash_regs_cnt; i++)
+		rte_write32(rte_cpu_to_le_32(filters[i]),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_HASH_TAB(i));
+
+	return 0;
+}
+
 static const struct eth_dev_ops t2h_eqos_ops = {
-	.dev_close		  = t2h_eqos_eth_close
-};
+	.dev_close		  = t2h_eqos_eth_close,
+	.promiscuous_enable	  = t2h_eqos_promiscuous_enable,
+	.promiscuous_disable	  = t2h_eqos_promiscuous_disable,
+	.allmulticast_enable	  = t2h_eqos_multicast_enable,
+	.allmulticast_disable	  = t2h_eqos_allmulticast_disable,
+	.mac_addr_set		  = t2h_eqos_set_mac_addr,
+	.mac_addr_add		  = t2h_eqos_add_mac_addr,
+	.mac_addr_remove	  = t2h_eqos_remove_mac_addr,
+	.set_mc_addr_list	  = t2h_eqos_set_mc_addr_list};
 
 static int
 t2h_eqos_eth_init(struct rte_eth_dev *dev)
