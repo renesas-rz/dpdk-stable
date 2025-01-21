@@ -374,6 +374,235 @@ t2h_eqos_core_init(struct renesas_t2h_private *priv)
 }
 
 static void
+t2h_eqos_mtl_rx_algorithms(struct renesas_t2h_private *priv)
+{
+	uint32_t value = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MTL_OPERATION_MODE));
+	value &= ~T2H_EQOS_MTL_OPERATION_RAA;
+	value |= T2H_EQOS_MTL_OPERATION_RAA_WSP;
+	rte_write32(rte_cpu_to_le_32(value),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MTL_OPERATION_MODE);
+}
+
+static void
+t2h_eqos_mtl_tx_algorithms(struct renesas_t2h_private *priv)
+{
+	uint32_t value = rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MTL_OPERATION_MODE));
+	value &= ~T2H_EQOS_MTL_OPERATION_SCHALG_MASK;
+	value |= T2H_EQOS_MTL_OPERATION_SCHALG_WRR;
+	rte_write32(rte_cpu_to_le_32(value),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MTL_OPERATION_MODE);
+}
+
+static void
+t2h_eqos_rx_queue_dma_chan_map(struct renesas_t2h_private *priv, uint32_t queue)
+{
+	uint32_t value;
+
+	if (queue < T2H_EQOS_QUEUE_REG_OTH) {
+		value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MTL_RXQ_DMA_MAP0));
+		value &= ~T2H_EQOS_MTL_RXQ_DMA_QXMDMACH_MASK(queue);
+		value |= T2H_EQOS_MTL_RXQ_DMA_QXMDMACH(queue, queue);
+		rte_write32(rte_cpu_to_le_32(value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MTL_RXQ_DMA_MAP0);
+	} else {
+		value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MTL_RXQ_DMA_MAP1));
+		value &= ~T2H_EQOS_MTL_RXQ_DMA_QXMDMACH_MASK(queue - T2H_EQOS_QUEUE_REG_OTH);
+		value |= T2H_EQOS_MTL_RXQ_DMA_QXMDMACH(queue, queue - T2H_EQOS_QUEUE_REG_OTH);
+		rte_write32(rte_cpu_to_le_32(value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MTL_RXQ_DMA_MAP1);
+	}
+}
+
+static void
+t2h_eqos_rx_queue_priority(struct renesas_t2h_private *priv)
+{
+	uint32_t priority;
+	uint32_t value = 0, value2 = 0;
+
+	switch (priv->rx_queues_to_use) {
+	case T2H_EQOS_QUEUE_NUM_TWO:
+		/* Assign vlan tag 0\1\6\7 to queue 0.*/
+		value = T2H_EQOS_TWO_QUEUE_Q_0;
+		/* Assign vlan tag 2\3\4\5 to queue 1 */
+		value |= T2H_EQOS_TWO_QUEUE_Q_1 << T2H_EQOS_RXQ_CTL2_PSRQ1_SHIFT;
+
+		rte_write32(rte_cpu_to_le_32(value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_RXQ_CTRL2);
+		break;
+	case T2H_EQOS_QUEUE_NUM_THREE:
+		/* Assign vlan tag  0\7 to queue 0. */
+		value = T2H_EQOS_THREE_QUEUE_Q_0;
+		/* Assign vlan tag 1\2\6 to queue 1. */
+		value |= T2H_EQOS_THREE_QUEUE_Q_1 << T2H_EQOS_RXQ_CTL2_PSRQ1_SHIFT;
+		/* Assign vlan tag 3\4\5 to queue 2 */
+		value |= T2H_EQOS_THREE_QUEUE_Q_2 << T2H_EQOS_RXQ_CTL2_PSRQ2_SHIFT;
+
+		rte_write32(rte_cpu_to_le_32(value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_RXQ_CTRL2);
+		break;
+	case T2H_EQOS_QUEUE_NUM_FOUR:
+		/* Assign vlan tag 0\7 to queue 0. */
+		value = T2H_EQOS_FOUR_QUEUE_Q_0;
+		/* Assign vlan tag 1\6 to queue 1. */
+		value |= T2H_EQOS_FOUR_QUEUE_Q_1 << T2H_EQOS_RXQ_CTL2_PSRQ1_SHIFT;
+		/* Assign vlan tag 2\5 to queue 2. */
+		value |= T2H_EQOS_FOUR_QUEUE_Q_2 << T2H_EQOS_RXQ_CTL2_PSRQ2_SHIFT;
+		/* Assign vlan tag 3\4 to queue 3. */
+		value |= T2H_EQOS_FOUR_QUEUE_Q_3 << T2H_EQOS_RXQ_CTL2_PSRQ3_SHIFT;
+
+		rte_write32(rte_cpu_to_le_32(value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_RXQ_CTRL2);
+		break;
+	case T2H_EQOS_QUEUE_NUM_FIVE:
+		/* Assign vlan tag 0\5 to queue 0. */
+		value = T2H_EQOS_FIVE_QUEUE_Q_0;
+		/* Assign vlan tag 1\4 to queue 1. */
+		value |= T2H_EQOS_FIVE_QUEUE_Q_1 << T2H_EQOS_RXQ_CTL2_PSRQ1_SHIFT;
+		/* Assign vlan tag 2\3 to queue 2. */
+		value |= T2H_EQOS_FIVE_QUEUE_Q_2 << T2H_EQOS_RXQ_CTL2_PSRQ2_SHIFT;
+		/* Assign vlan tag 6 to queue 3. */
+		value |= T2H_EQOS_QUEUE_MAP_6 << T2H_EQOS_RXQ_CTL2_PSRQ3_SHIFT;
+		/* Assign vlan tag 7 to queue 4. */
+		value2 = T2H_EQOS_QUEUE_MAP_7;
+
+		rte_write32(rte_cpu_to_le_32(value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_RXQ_CTRL2);
+		rte_write32(rte_cpu_to_le_32(value2),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_RXQ_CTRL3);
+		break;
+	case T2H_EQOS_QUEUE_NUM_SIX:
+		/* Assign vlan tag 0\3 to queue 0. */
+		value = T2H_EQOS_SIX_QUEUE_Q_0;
+		/* Assign vlan tag 1\2 to queue 1. */
+		value |= T2H_EQOS_SIX_QUEUE_Q_1 << T2H_EQOS_RXQ_CTL2_PSRQ1_SHIFT;
+		/* Assign vlan tag 4 to queue 2. */
+		value |= T2H_EQOS_QUEUE_MAP_4 << T2H_EQOS_RXQ_CTL2_PSRQ2_SHIFT;
+		/* Assign vlan tag 5 to queue 3. */
+		value |= T2H_EQOS_QUEUE_MAP_5 << T2H_EQOS_RXQ_CTL2_PSRQ3_SHIFT;
+		/* Assign vlan tag 6 to queue 4. */
+		value2 = T2H_EQOS_QUEUE_MAP_6;
+		/* Assign vlan tag 7 to queue 5. */
+		value2 |= T2H_EQOS_QUEUE_MAP_7 << T2H_EQOS_RXQ_CTL3_PSRQ5_SHIFT;
+
+		rte_write32(rte_cpu_to_le_32(value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_RXQ_CTRL2);
+		rte_write32(rte_cpu_to_le_32(value2),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_RXQ_CTRL3);
+		break;
+	case T2H_EQOS_QUEUE_NUM_SEVEN:
+		/* Assign vlan tag 0 to queue 0. */
+		value = T2H_EQOS_QUEUE_MAP_0;
+		/* Assign vlan tag 1\2 to queue 1. */
+		value |= T2H_EQOS_SEVEN_QUEUE_Q_1 << T2H_EQOS_RXQ_CTL2_PSRQ1_SHIFT;
+		/* Assign vlan tag 3 to queue 2. */
+		value |= T2H_EQOS_QUEUE_MAP_3 << T2H_EQOS_RXQ_CTL2_PSRQ2_SHIFT;
+		/* Assign vlan tag 4 to queue 3. */
+		value |= T2H_EQOS_QUEUE_MAP_4 << T2H_EQOS_RXQ_CTL2_PSRQ3_SHIFT;
+		/* Assign vlan tag 5 to queue 4. */
+		value2 = T2H_EQOS_QUEUE_MAP_5;
+		/* Assign vlan tag 6 to queue 5. */
+		value2 |= T2H_EQOS_QUEUE_MAP_6 << T2H_EQOS_RXQ_CTL3_PSRQ5_SHIFT;
+		/* Assign vlan tag 7 to queue 6. */
+		value2 |= T2H_EQOS_QUEUE_MAP_7 << T2H_EQOS_RXQ_CTL3_PSRQ6_SHIFT;
+
+		rte_write32(rte_cpu_to_le_32(value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_RXQ_CTRL2);
+		rte_write32(rte_cpu_to_le_32(value2),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_RXQ_CTRL3);
+		break;
+	case T2H_EQOS_QUEUE_NUM_EIGHT:
+		/* Assign vlan tag 0 to queue 0. */
+		value = T2H_EQOS_QUEUE_MAP_0;
+		/* Assign vlan tag 1 to queue 1. */
+		value |= T2H_EQOS_QUEUE_MAP_1 << T2H_EQOS_RXQ_CTL2_PSRQ1_SHIFT;
+		/* Assign vlan tag 2 to queue 2. */
+		value |= T2H_EQOS_QUEUE_MAP_2 << T2H_EQOS_RXQ_CTL2_PSRQ2_SHIFT;
+		/* Assign vlan tag 3 to queue 3. */
+		value |= T2H_EQOS_QUEUE_MAP_3 << T2H_EQOS_RXQ_CTL2_PSRQ3_SHIFT;
+		/* Assign vlan tag 4 to queue 4. */
+		value2 = T2H_EQOS_QUEUE_MAP_4;
+		/* Assign vlan tag 5 to queue 5. */
+		value2 |= T2H_EQOS_QUEUE_MAP_5 << T2H_EQOS_RXQ_CTL3_PSRQ5_SHIFT;
+		/* Assign vlan tag 6 to queue 6. */
+		value2 |= T2H_EQOS_QUEUE_MAP_6 << T2H_EQOS_RXQ_CTL3_PSRQ6_SHIFT;
+		/* Assign vlan tag 7 to queue 7. */
+		value2 |= T2H_EQOS_QUEUE_MAP_7 << T2H_EQOS_RXQ_CTL3_PSRQ7_SHIFT;
+
+		rte_write32(rte_cpu_to_le_32(value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_RXQ_CTRL2);
+		rte_write32(rte_cpu_to_le_32(value2),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_RXQ_CTRL3);
+		break;
+	default:
+		rte_write32(rte_cpu_to_le_32(value),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_RXQ_CTRL2);
+		break;
+	}
+}
+
+static void
+t2h_eqos_mtl_rxq_control(struct renesas_t2h_private *priv)
+{
+	for (uint32_t queue = 0; queue < priv->rx_queues_to_use; queue++) {
+		uint32_t value =
+			rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+						    T2H_EQOS_MTL_RXQ_CONTROL_BASE_ADDR(queue)));
+
+		value &= ~T2H_EQOS_MTL_RXQ_CONTROL_WEGT_MASK;
+		value |= T2H_EQOS_RXQ_DEF_WEGT & T2H_EQOS_MTL_RXQ_CONTROL_WEGT_MASK;
+		value |= T2H_EQOS_MTL_RXQ_CONTROL_RXQ_FRM_ARBIT;
+		rte_write32(rte_cpu_to_le_32(value),
+			    (uint8_t *)priv->hw_baseaddr_v +
+				    T2H_EQOS_MTL_RXQ_CONTROL_BASE_ADDR(queue));
+	}
+}
+
+static void
+t2h_eqos_set_tx_queue_weight(struct renesas_t2h_private *priv)
+{
+	for (uint32_t queue = 0; queue < priv->tx_queues_to_use; queue++) {
+		uint32_t value =
+			rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+						    T2H_EQOS_MTL_TXQX_WEIGHT_BASE_ADDR(queue)));
+
+		value &= ~T2H_EQOS_MTL_TXQ_WEIGHT_ISCQW_MASK;
+		value |= T2H_EQOS_TXQ_DEF_WEGT & T2H_EQOS_MTL_TXQ_WEIGHT_ISCQW_MASK;
+		rte_write32(rte_cpu_to_le_32(value),
+			    (uint8_t *)priv->hw_baseaddr_v +
+				    T2H_EQOS_MTL_TXQX_WEIGHT_BASE_ADDR(queue));
+	}
+}
+
+static void
+t2h_eqos_mtl_configuration(struct renesas_t2h_private *priv)
+{
+	uint32_t rxq_cnt = priv->rx_queues_to_use;
+	uint32_t txq_cnt = priv->tx_queues_to_use;
+	uint32_t queue;
+
+	for (queue = 0; queue < rxq_cnt; queue++) {
+		/* Mapping RX queue to DMA Channel */
+		t2h_eqos_rx_queue_dma_chan_map(priv, queue);
+	}
+
+	if (rxq_cnt > T2H_EQOS_DEF_QUEUE_NUM) {
+		t2h_eqos_mtl_rxq_control(priv);
+		/* Configure RXQ Algorithm to WSP */
+		t2h_eqos_mtl_rx_algorithms(priv);
+		/* Assign priority to each RXQ */
+		t2h_eqos_rx_queue_priority(priv);
+	}
+	if (txq_cnt > T2H_EQOS_DEF_QUEUE_NUM) {
+		t2h_eqos_mtl_tx_algorithms(priv);
+		t2h_eqos_set_tx_queue_weight(priv);
+	}
+}
+
+static void
 t2h_eqos_mac_enable_rx_queues(struct renesas_t2h_private *priv)
 {
 	uint32_t rxq_cnt = priv->rx_queues_to_use;
@@ -712,6 +941,9 @@ t2h_eqos_hw_setup(struct renesas_t2h_private *priv)
 
 	/* Init MAC Configuration */
 	t2h_eqos_core_init(priv);
+
+	/* In the case of multiple queues, configure MTL */
+	t2h_eqos_mtl_configuration(priv);
 
 	/* Set each RXQ to Enable */
 	t2h_eqos_mac_enable_rx_queues(priv);
