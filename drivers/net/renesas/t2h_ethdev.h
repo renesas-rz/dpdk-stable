@@ -193,6 +193,99 @@
 
 #define T2H_EQOS_REG_WIDTH                      4
 
+struct t2h_eqos_mmc_stats {
+
+	uint64_t txoctetcount_gb;
+	uint64_t txpacketscount_gb;
+	uint64_t txbroadcastpackets_g;
+	uint64_t txmulticastpackets_g;
+	uint64_t tx64octets_gb;
+	uint64_t tx65to127octets_gb;
+	uint64_t tx128to255octets_gb;
+	uint64_t tx256to511octets_gb;
+	uint64_t tx512to1023octets_gb;
+	uint64_t tx1024tomaxoctets_gb;
+	uint64_t txunicastpackets_gb;
+	uint64_t txmulticastpackets_gb;
+	uint64_t txbroadcastpackets_gb;
+	uint64_t txunderflowerror;
+	uint64_t txsinglecollision_g;
+	uint64_t txmultiplecollision_g;
+	uint64_t txdeferred;
+	uint64_t txlatecollision;
+	uint64_t txexcessivecollision;
+	uint64_t txcarriererror;
+	uint64_t txoctetcount_g;
+	uint64_t txpacketcount_g;
+	uint64_t txexcessivedeferral;
+	uint64_t txpausepackets;
+	uint64_t txvlanpackets_g;
+
+	uint64_t rxpacketcount_gb;
+	uint64_t rxoctetcount_gb;
+	uint64_t rxoctetcount_g;
+	uint64_t rxbroadcastpackets_g;
+	uint64_t rxmulticastpackets_g;
+	uint64_t rxcrcerror;
+	uint64_t rxalignmenterror;
+	uint64_t rxrunterror;
+	uint64_t rxjabbererror;
+	uint64_t rxundersize_g;
+	uint64_t rxoversize_g;
+	uint64_t rx64octets_gb;
+	uint64_t rx65to127octets_gb;
+	uint64_t rx128to255octets_gb;
+	uint64_t rx256to511octets_gb;
+	uint64_t rx512to1023octets_gb;
+	uint64_t rx1024tomaxoctets_gb;
+	uint64_t rxunicastpackets_g;
+	uint64_t rxlengtherror;
+	uint64_t rxoutofrangetype;
+	uint64_t rxpausepackets;
+	uint64_t rxfifooverflow;
+	uint64_t rxvlanpackets_gb;
+	uint64_t rxwatchdogerror;
+
+	uint64_t rxipcintr;
+
+	uint64_t rxipv4_gb;
+	uint64_t rxipv4_hderr;
+	uint64_t rxipv4_nopay;
+	uint64_t rxipv4_frag;
+	uint64_t rxipv4_udsbl;
+	uint64_t rxipv4_gb_octets;
+	uint64_t rxipv4_hderr_octets;
+	uint64_t rxipv4_nopay_octets;
+	uint64_t rxipv4_frag_octets;
+	uint64_t rxipv4_udsbl_octets;
+
+	uint64_t rxipv6_gb_octets;
+	uint64_t rxipv6_hderr_octets;
+	uint64_t rxipv6_nopay_octets;
+	uint64_t rxipv6_gb;
+	uint64_t rxipv6_hderr;
+	uint64_t rxipv6_nopay;
+
+	uint64_t rxudp_gb;
+	uint64_t rxudp_err;
+	uint64_t rxtcp_gb;
+	uint64_t rxtcp_err;
+	uint64_t rxicmp_gb;
+	uint64_t rxicmp_err;
+	uint64_t rxudp_gb_octets;
+	uint64_t rxudp_err_octets;
+	uint64_t rxtcp_gb_octets;
+	uint64_t rxtcp_err_octets;
+	uint64_t rxicmp_gb_octets;
+	uint64_t rxicmp_err_octets;
+	uint64_t txfpefragmentcntr;
+	uint64_t txholdreqcntr;
+	uint64_t rxpacketassemblyerrcntr;
+	uint64_t rxpacketsmderrcntr;
+	uint64_t rxpacketassemblyokcntr;
+	uint64_t rxfpefragmentcntr;
+};
+
 struct renesas_t2h_private {
 	struct rte_eth_dev *dev;
 	struct rte_eth_stats stats;
@@ -210,6 +303,7 @@ struct renesas_t2h_private {
 	void *dma_baseaddr_t[T2H_EQOS_MAX_Q];
 	uint32_t dma_rx_size;
 	uint32_t dma_tx_size;
+	struct t2h_eqos_mmc_stats mmc_stats;
 	uint32_t vlan_num;
 	uint32_t vlhash;
 	unsigned long config_vlans[BITS_TO_LONGS(T2H_EQOS_VLAN_N_VID)];
@@ -226,5 +320,111 @@ struct renesas_t2h_private {
 	uint32_t flag_csum;
 	uint32_t version_id;
 };
+
+struct t2h_eqos_xstats {
+	char name[RTE_ETH_XSTATS_NAME_SIZE];
+	int offset;
+};
+
+#define T2H_EQOS_MMC_STAT(_string, _var)                            \
+	{                                                           \
+		_string, offsetof(struct t2h_eqos_mmc_stats, _var), \
+	}
+
+static const struct t2h_eqos_xstats t2h_eqos_xstats_strings[] = {
+
+	T2H_EQOS_MMC_STAT("tx_bytes", txoctetcount_gb),
+	T2H_EQOS_MMC_STAT("tx_packets", txpacketscount_gb),
+	T2H_EQOS_MMC_STAT("tx_broadcast_good", txbroadcastpackets_g),
+	T2H_EQOS_MMC_STAT("tx_multicast_good", txmulticastpackets_g),
+	T2H_EQOS_MMC_STAT("tx_64_byte_packets", tx64octets_gb),
+	T2H_EQOS_MMC_STAT("tx_65_to_127_byte_packets", tx65to127octets_gb),
+	T2H_EQOS_MMC_STAT("tx_128_to_255_byte_packets", tx128to255octets_gb),
+	T2H_EQOS_MMC_STAT("tx_256_to_511_byte_packets", tx256to511octets_gb),
+	T2H_EQOS_MMC_STAT("tx_512_to_1023_byte_packets", tx512to1023octets_gb),
+	T2H_EQOS_MMC_STAT("tx_1024_to_max_byte_packets", tx1024tomaxoctets_gb),
+	T2H_EQOS_MMC_STAT("tx_unicast_packets", txunicastpackets_gb),
+	T2H_EQOS_MMC_STAT("tx_multicast_packets", txmulticastpackets_gb),
+	T2H_EQOS_MMC_STAT("tx_broadcast_packets", txbroadcastpackets_gb),
+	T2H_EQOS_MMC_STAT("tx_underflow_errors", txunderflowerror),
+	T2H_EQOS_MMC_STAT("tx_single_collision", txsinglecollision_g),
+	T2H_EQOS_MMC_STAT("tx_multiple_collision", txmultiplecollision_g),
+	T2H_EQOS_MMC_STAT("tx_deferred", txdeferred),
+	T2H_EQOS_MMC_STAT("tx_late_collision", txlatecollision),
+	T2H_EQOS_MMC_STAT("tx_excessive_collision", txexcessivecollision),
+	T2H_EQOS_MMC_STAT("tx_carrier_error", txcarriererror),
+	T2H_EQOS_MMC_STAT("tx_octet_good", txoctetcount_g),
+	T2H_EQOS_MMC_STAT("tx_packet_good", txpacketcount_g),
+	T2H_EQOS_MMC_STAT("tx_excessive_deferral", txexcessivedeferral),
+	T2H_EQOS_MMC_STAT("tx_pause_frames", txpausepackets),
+	T2H_EQOS_MMC_STAT("tx_vlan_packets", txvlanpackets_g),
+
+	T2H_EQOS_MMC_STAT("rx_packets", rxpacketcount_gb),
+	T2H_EQOS_MMC_STAT("rx_bytes", rxoctetcount_gb),
+	T2H_EQOS_MMC_STAT("rx_bytes_good", rxoctetcount_g),
+	T2H_EQOS_MMC_STAT("rx_broadcast_packets", rxbroadcastpackets_g),
+	T2H_EQOS_MMC_STAT("rx_multicast_packets", rxmulticastpackets_g),
+	T2H_EQOS_MMC_STAT("rx_crc_errors", rxcrcerror),
+	T2H_EQOS_MMC_STAT("rx_alignment_errors", rxalignmenterror),
+	T2H_EQOS_MMC_STAT("rx_runt_error", rxrunterror),
+	T2H_EQOS_MMC_STAT("rx_jabber_error", rxjabbererror),
+	T2H_EQOS_MMC_STAT("rx_undersize_packets", rxundersize_g),
+	T2H_EQOS_MMC_STAT("rx_oversize_packets", rxoversize_g),
+	T2H_EQOS_MMC_STAT("rx_64_byte_packets", rx64octets_gb),
+	T2H_EQOS_MMC_STAT("rx_65_to_127_byte_packets", rx65to127octets_gb),
+	T2H_EQOS_MMC_STAT("rx_128_to_255_byte_packets", rx128to255octets_gb),
+	T2H_EQOS_MMC_STAT("rx_256_to_511_byte_packets", rx256to511octets_gb),
+	T2H_EQOS_MMC_STAT("rx_512_to_1023_byte_packets", rx512to1023octets_gb),
+	T2H_EQOS_MMC_STAT("rx_1024_to_max_byte_packets", rx1024tomaxoctets_gb),
+	T2H_EQOS_MMC_STAT("rx_unicast_packets", rxunicastpackets_g),
+	T2H_EQOS_MMC_STAT("rx_length_errors", rxlengtherror),
+	T2H_EQOS_MMC_STAT("rx_out_of_range_errors", rxoutofrangetype),
+	T2H_EQOS_MMC_STAT("rx_pause_packets", rxpausepackets),
+	T2H_EQOS_MMC_STAT("rx_fifo_overflow_errors", rxfifooverflow),
+	T2H_EQOS_MMC_STAT("rx_vlan_packets", rxvlanpackets_gb),
+	T2H_EQOS_MMC_STAT("rx_watchdog_errors", rxwatchdogerror),
+
+	T2H_EQOS_MMC_STAT("rx_ipc_intr", rxipcintr),
+
+	T2H_EQOS_MMC_STAT("rx_ipv4_gd", rxipv4_gb),
+	T2H_EQOS_MMC_STAT("rx_ipv4_hderr", rxipv4_hderr),
+	T2H_EQOS_MMC_STAT("rx_ipv4_nopay", rxipv4_nopay),
+	T2H_EQOS_MMC_STAT("rx_ipv4_frag", rxipv4_frag),
+	T2H_EQOS_MMC_STAT("rx_ipv4_udsbl", rxipv4_udsbl),
+	T2H_EQOS_MMC_STAT("rx_ipv4_gd_octets", rxipv4_gb_octets),
+	T2H_EQOS_MMC_STAT("rx_ipv4_hderr_octets", rxipv4_hderr_octets),
+	T2H_EQOS_MMC_STAT("rx_ipv4_nopay_octets", rxipv4_nopay_octets),
+	T2H_EQOS_MMC_STAT("rx_ipv4_frag_octets", rxipv4_frag_octets),
+	T2H_EQOS_MMC_STAT("rx_ipv4_udsbl_octets", rxipv4_udsbl_octets),
+
+	T2H_EQOS_MMC_STAT("rx_ipv6_gd_octets", rxipv6_gb_octets),
+	T2H_EQOS_MMC_STAT("rx_ipv6_hderr_octets", rxipv6_hderr_octets),
+	T2H_EQOS_MMC_STAT("ipv6_nopay_octets", rxipv6_nopay_octets),
+	T2H_EQOS_MMC_STAT("rx_ipv6_gd", rxipv6_gb),
+	T2H_EQOS_MMC_STAT("rx_ipv6_hderr", rxipv6_hderr),
+	T2H_EQOS_MMC_STAT("rx_ipv6_nopay", rxipv6_nopay),
+
+	T2H_EQOS_MMC_STAT("rx_udp_gd", rxudp_gb),
+	T2H_EQOS_MMC_STAT("rx_udp_err", rxudp_err),
+	T2H_EQOS_MMC_STAT("rx_tcp_gd", rxtcp_gb),
+	T2H_EQOS_MMC_STAT("rx_tcp_err", rxtcp_err),
+	T2H_EQOS_MMC_STAT("rx_icmp_gd", rxicmp_gb),
+	T2H_EQOS_MMC_STAT("rx_icmp_err", rxicmp_err),
+	T2H_EQOS_MMC_STAT("rx_udp_gd_octets", rxudp_gb_octets),
+	T2H_EQOS_MMC_STAT("udp_err_octets", rxudp_err_octets),
+	T2H_EQOS_MMC_STAT("rx_tcp_gd_octets", rxtcp_gb_octets),
+	T2H_EQOS_MMC_STAT("rx_tcp_err_octets", rxtcp_err_octets),
+	T2H_EQOS_MMC_STAT("rx_icmp_gd_octets", rxicmp_gb_octets),
+	T2H_EQOS_MMC_STAT("rx_icmp_err_octets", rxicmp_err_octets),
+	T2H_EQOS_MMC_STAT("tx_fpe_fragment_cntr", txfpefragmentcntr),
+	T2H_EQOS_MMC_STAT("tx_hold_req_cntr", txholdreqcntr),
+	T2H_EQOS_MMC_STAT("rx_packet_assembly_err_cntr", rxpacketassemblyerrcntr),
+	T2H_EQOS_MMC_STAT("rx_packet_smd_err_cntr", rxpacketsmderrcntr),
+	T2H_EQOS_MMC_STAT("rx_packet_assembly_ok_cntr", rxpacketassemblyokcntr),
+	T2H_EQOS_MMC_STAT("rx_fpe_fragment_cntr", rxfpefragmentcntr),
+};
+
+#define T2H_EQOS_ARRAY_SIZE(arr)		RTE_DIM(arr)
+#define T2H_EQOS_XSTATS_COUNT			T2H_EQOS_ARRAY_SIZE(t2h_eqos_xstats_strings)
 
 #endif /*__T2H_ETHDEV_H__*/

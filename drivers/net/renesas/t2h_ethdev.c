@@ -282,6 +282,25 @@ t2h_eqos_eth_configure(struct rte_eth_dev *dev)
 }
 
 static int
+t2h_eqos_eth_info(__rte_unused struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
+{
+	dev_info->speed_capa = RTE_ETH_LINK_SPEED_10M;
+	dev_info->speed_capa |= RTE_ETH_LINK_SPEED_100M;
+	dev_info->speed_capa |= RTE_ETH_LINK_SPEED_1G;
+
+	dev_info->max_rx_pktlen	  = T2H_EQOS_MAX_RX_PKT_LEN;
+	dev_info->max_rx_queues	  = T2H_EQOS_MAX_Q;
+	dev_info->max_tx_queues	  = T2H_EQOS_MAX_Q;
+	dev_info->rx_offload_capa = dev_rx_offloads_sup;
+	dev_info->max_mac_addrs	  = T2H_EQOS_MAX_MAC_ADDR;
+
+	dev_info->min_mtu = T2H_EQOS_ZLEN - T2H_EQOS_HLEN;
+	dev_info->max_mtu = T2H_EQOS_JUMBO_LEN;
+
+	return 0;
+}
+
+static int
 t2h_eqos_dma_reset(struct renesas_t2h_private *priv)
 {
 	uint32_t value = rte_le_to_cpu_32(
@@ -597,6 +616,33 @@ t2h_eqos_dma_operation_mode(struct renesas_t2h_private *priv)
 			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MTL_CHAN_TX_OP_MODE(chan));
 	}
 }
+
+static void
+t2h_eqos_mmc_setup(struct renesas_t2h_private *priv)
+{
+	uint32_t mode = T2H_EQOS_MMC_CNTRL_RESET_ON_READ | T2H_EQOS_MMC_CNTRL_COUNTER_RESET |
+			T2H_EQOS_MMC_CNTRL_PRESET | T2H_EQOS_MMC_CNTRL_FULL_HALF_PRESET;
+
+	/* Enable all MMC IRQ */
+	rte_write32(rte_cpu_to_le_32(T2H_EQOS_MMC_RXTX_DEFAULT_MASK),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_INTR_MASK);
+	rte_write32(rte_cpu_to_le_32(T2H_EQOS_MMC_RXTX_DEFAULT_MASK),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_INTR_MASK);
+	rte_write32(rte_cpu_to_le_32(T2H_EQOS_MMC_DEFAULT_MASK),
+		    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_IPC_INTR_MASK);
+
+	uint32_t value =
+		rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_CNTRL));
+
+	value |= (mode & T2H_EQOS_MMC_DEF_CTL);
+
+	rte_write32(rte_cpu_to_le_32(value), (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_CNTRL);
+
+	/* Reset stats */
+	memset(&priv->mmc_stats, T2H_EQOS_EMPTY_MASK, sizeof(struct t2h_eqos_mmc_stats));
+
+}
+
 static void
 t2h_eqos_enable_sph(struct renesas_t2h_private *priv, bool enable)
 {
@@ -679,6 +725,8 @@ t2h_eqos_hw_setup(struct renesas_t2h_private *priv)
 
 	/* RX/TX Operation Mode Config */
 	t2h_eqos_dma_operation_mode(priv);
+
+	t2h_eqos_mmc_setup(priv);
 
 	/* Convert the timer from msec to usec */
 	for (chan = 0; chan < rx_dma_cnt; chan++)
@@ -1412,6 +1460,546 @@ t2h_eqos_mtu_set(struct rte_eth_dev *dev, uint16_t new_mtu)
 	return 0;
 }
 
+static inline int
+t2h_eqos_read_regs(struct renesas_t2h_private *priv, uint32_t *reg_buf)
+{
+	uint32_t reg_addr[T2H_EQOS_REG_NUM];
+	int i, v_count;
+	uint32_t value;
+
+	v_count = 0;
+
+	for (i = 0; i < T2H_EQOS_MAC_REG_NUM; i++) {
+		value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + i * T2H_EQOS_REG_WIDTH));
+		reg_addr[v_count]  = i * T2H_EQOS_REG_WIDTH;
+		reg_buf[v_count++] = value;
+	}
+
+	for (i = 0; i < T2H_EQOS_DMA_REG_NUM; i++) {
+		value		   = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+								 T2H_EQOS_DMA_BUS_MODE +
+								 i * T2H_EQOS_REG_WIDTH));
+		reg_addr[v_count]  = T2H_EQOS_DMA_BUS_MODE + i * T2H_EQOS_REG_WIDTH;
+		reg_buf[v_count++] = value;
+	}
+
+	for (i = 0; i < T2H_EQOS_DMA_CH_NB_MAX; i++) {
+		value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_CTRL(i)));
+		reg_addr[v_count]  = T2H_EQOS_DMA_CH_CTRL(i);
+		reg_buf[v_count++] = value;
+
+		value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_TX_CTRL(i)));
+		reg_addr[v_count]  = T2H_EQOS_DMA_CH_TX_CTRL(i);
+		reg_buf[v_count++] = value;
+
+		value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_RX_CTRL(i)));
+		reg_addr[v_count]  = T2H_EQOS_DMA_CH_RX_CTRL(i);
+		reg_buf[v_count++] = value;
+
+		value		   = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+								 T2H_EQOS_DMA_CH_TX_BASE_ADDR(i)));
+		reg_addr[v_count]  = T2H_EQOS_DMA_CH_TX_BASE_ADDR(i);
+		reg_buf[v_count++] = value;
+
+		value		   = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+								 T2H_EQOS_DMA_CH_RX_BASE_ADDR(i)));
+		reg_addr[v_count]  = T2H_EQOS_DMA_CH_RX_BASE_ADDR(i);
+		reg_buf[v_count++] = value;
+
+		value		   = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+								 T2H_EQOS_DMA_CH_TX_END_ADDR(i)));
+		reg_addr[v_count]  = T2H_EQOS_DMA_CH_TX_END_ADDR(i);
+		reg_buf[v_count++] = value;
+
+		value		   = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+								 T2H_EQOS_DMA_CH_RX_END_ADDR(i)));
+		reg_addr[v_count]  = T2H_EQOS_DMA_CH_RX_END_ADDR(i);
+		reg_buf[v_count++] = value;
+
+		value		   = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+								 T2H_EQOS_DMA_CH_TX_RING_LEN(i)));
+		reg_addr[v_count]  = T2H_EQOS_DMA_CH_TX_RING_LEN(i);
+		reg_buf[v_count++] = value;
+
+		value		   = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+								 T2H_EQOS_DMA_CH_RX_RING_LEN(i)));
+		reg_addr[v_count]  = T2H_EQOS_DMA_CH_RX_RING_LEN(i);
+		reg_buf[v_count++] = value;
+
+		value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_INTR_ENA(i)));
+		reg_addr[v_count]  = T2H_EQOS_DMA_CH_INTR_ENA(i);
+		reg_buf[v_count++] = value;
+
+		value		   = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+								 T2H_EQOS_DMA_CH_RX_WATCHDOG(i)));
+		reg_addr[v_count]  = T2H_EQOS_DMA_CH_RX_WATCHDOG(i);
+		reg_buf[v_count++] = value;
+
+		value		   = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+								 T2H_EQOS_DMA_CH_SLOT_CTRL_STATUS(i)));
+		reg_addr[v_count]  = T2H_EQOS_DMA_CH_SLOT_CTRL_STATUS(i);
+		reg_buf[v_count++] = value;
+
+		value		   = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+								 T2H_EQOS_DMA_CH_CUR_TX_DESC(i)));
+		reg_addr[v_count]  = T2H_EQOS_DMA_CH_CUR_TX_DESC(i);
+		reg_buf[v_count++] = value;
+
+		value		   = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+								 T2H_EQOS_DMA_CH_CUR_RX_DESC(i)));
+		reg_addr[v_count]  = T2H_EQOS_DMA_CH_CUR_RX_DESC(i);
+		reg_buf[v_count++] = value;
+
+		value		   = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+								 T2H_EQOS_DMA_CH_CUR_TX_BUF_ADDR(i)));
+		reg_addr[v_count]  = T2H_EQOS_DMA_CH_CUR_TX_BUF_ADDR(i);
+		reg_buf[v_count++] = value;
+
+		value		   = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+								 T2H_EQOS_DMA_CH_CUR_RX_BUF_ADDR(i)));
+		reg_addr[v_count]  = T2H_EQOS_DMA_CH_CUR_RX_BUF_ADDR(i);
+		reg_buf[v_count++] = value;
+
+		value = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_DMA_CH_STATUS(i)));
+		reg_addr[v_count]  = T2H_EQOS_DMA_CH_STATUS(i);
+		reg_buf[v_count++] = value;
+
+		value		   = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+								 T2H_EQOS_DMA_CH_MISS_FRAME_CNT(i)));
+		reg_addr[v_count]  = T2H_EQOS_DMA_CH_MISS_FRAME_CNT(i);
+		reg_buf[v_count++] = value;
+	}
+
+	for (i = 0; i < v_count; i++)
+		T2H_EQOS_PMD_INFO("address = 0x%x  value = 0x%x", reg_addr[i], reg_buf[i]);
+
+	return v_count;
+}
+
+static void
+t2h_get_desc(struct rte_eth_dev *dev)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+	struct t2h_bufdesc *p;
+	uint32_t des0, des1, des2, des3, q_idx;
+
+	for (q_idx = 0; q_idx < priv->rx_queues_to_use; q_idx++) {
+		struct t2h_eqos_priv_rx_q *rxq = dev->data->rx_queues[q_idx];
+		for (uint32_t i = 0; i < priv->dma_rx_size; i++) {
+			p    = (struct t2h_bufdesc *)(rxq->dma_rx + i);
+			des0 = rte_le_to_cpu_32(rte_read32(&p->des0));
+			des1 = rte_le_to_cpu_32(rte_read32(&p->des1));
+			des2 = rte_le_to_cpu_32(rte_read32(&p->des2));
+			des3 = rte_le_to_cpu_32(rte_read32(&p->des3));
+			T2H_EQOS_PMD_DEBUG("rx %d desc %03d : p = %p des0 = 0x%x, des1 "
+					   "= 0x%x, des2 = 0x%x, des3 = 0x%x",
+					   q_idx, i, p, des0, des1, des2, des3);
+		}
+	}
+
+	for (q_idx = 0; q_idx < priv->tx_queues_to_use; q_idx++) {
+		struct t2h_eqos_priv_tx_q *txq = dev->data->tx_queues[q_idx];
+		for (uint32_t i = 0; i < txq->nb_tx_desc; i++) {
+			p    = (struct t2h_bufdesc *)(txq->tx_base + i);
+			des0 = rte_le_to_cpu_32(rte_read32(&p->des0));
+			des1 = rte_le_to_cpu_32(rte_read32(&p->des1));
+			des2 = rte_le_to_cpu_32(rte_read32(&p->des2));
+			des3 = rte_le_to_cpu_32(rte_read32(&p->des3));
+			T2H_EQOS_PMD_DEBUG("tx %d desc %03d : p = %p des0 = 0x%x, des1 "
+					   "= 0x%x, des2 = 0x%x, des3 = 0x%x",
+					   q_idx, i, p, des0, des1, des2, des3);
+		}
+	}
+}
+
+static int
+t2h_eqos_get_regs(struct rte_eth_dev *dev, struct rte_dev_reg_info *regs)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+	uint32_t *data                   = regs->data;
+
+	if (data == NULL) {
+		regs->length  = T2H_EQOS_REG_NUM;
+		regs->width   = sizeof(uint32_t);
+		regs->version = priv->version_id;
+		return 0;
+	}
+
+	if (regs->length == 0) {
+		t2h_eqos_read_regs(priv, &data[0]);
+#if T2H_DEBUG
+		t2h_get_desc(dev);
+#endif
+		return 0;
+	}
+
+	return 0;
+}
+
+static int
+t2h_eqos_stats_get(struct rte_eth_dev *dev, struct rte_eth_stats *stats)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+	struct rte_eth_stats *eth_stats	 = &priv->stats;
+
+	stats->ipackets  = eth_stats->ipackets;
+	stats->ibytes    = eth_stats->ibytes;
+	stats->ierrors   = eth_stats->ierrors;
+	stats->opackets  = eth_stats->opackets;
+	stats->obytes    = eth_stats->obytes;
+	stats->oerrors   = eth_stats->oerrors;
+	stats->rx_nombuf = eth_stats->rx_nombuf;
+
+	return 0;
+}
+
+static const uint32_t *
+t2h_eqos_supported_ptypes_get(struct rte_eth_dev *dev __rte_unused)
+{
+	static const uint32_t ptypes[] = {/* 'ether type'=[0x0800|0x86DD] */
+					  RTE_PTYPE_L2_ETHER,
+					  /* 'ether type'=0x0800 'version'=4, 'ihl'=5 */
+					  RTE_PTYPE_L3_IPV4,
+					  /* 'ether type'=0x86DD 'version'=6, 'next header'=17 */
+					  RTE_PTYPE_L4_UDP,
+					  /* 'ether type'=0x88F7> */
+					  RTE_PTYPE_L2_ETHER_TIMESYNC,
+					  /* <'ether type'=0x86DD 'version'=6, 'next header'=17> */
+					  RTE_PTYPE_INNER_L4_UDP};
+
+	return ptypes;
+}
+
+static int
+t2h_eqos_stats_reset(struct rte_eth_dev *dev)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+
+	/* Reset software totals */
+	memset(&priv->stats, 0, sizeof(priv->stats));
+
+	return 0;
+}
+
+static void
+t2h_eqos_read_mmc_stats(struct renesas_t2h_private *priv)
+{
+	struct t2h_eqos_mmc_stats *stats = &priv->mmc_stats;
+
+	stats->txoctetcount_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_OCTETCOUNT_GB));
+	stats->txpacketscount_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_FRAMECOUNT_GB));
+	stats->txbroadcastpackets_g += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_BROADCASTFRAME_G));
+	stats->txmulticastpackets_g += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_MULTICASTFRAME_G));
+	stats->tx64octets_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_64_OCTETS_GB));
+	stats->tx65to127octets_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_65_TO_127_OCTETS_GB));
+	stats->tx128to255octets_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_128_TO_255_OCTETS_GB));
+	stats->tx256to511octets_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_256_TO_511_OCTETS_GB));
+	stats->tx512to1023octets_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_512_TO_1023_OCTETS_GB));
+	stats->tx1024tomaxoctets_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_1024_TO_MAX_OCTETS_GB));
+	stats->txunicastpackets_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_UNICAST_GB));
+	stats->txmulticastpackets_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_MULTICAST_GB));
+	stats->txbroadcastpackets_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_BROADCAST_GB));
+	stats->txunderflowerror += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_UNDERFLOW_ERROR));
+	stats->txsinglecollision_g += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_SINGLECOL_G));
+	stats->txmultiplecollision_g += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_MULTICOL_G));
+	stats->txdeferred += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_DEFERRED));
+	stats->txlatecollision += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_LATECOL));
+	stats->txexcessivecollision += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_EXESSCOL));
+	stats->txcarriererror += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_CARRIER_ERROR));
+	stats->txoctetcount_g += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_OCTETCOUNT_G));
+	stats->txpacketcount_g += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_FRAMECOUNT_G));
+	stats->txexcessivedeferral += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_EXCESSDEF));
+	stats->txpausepackets += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_PAUSE_FRAME));
+	stats->txvlanpackets_g += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_VLAN_FRAME_G));
+
+	stats->rxpacketcount_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_FRAMECOUNT_GB));
+	stats->rxoctetcount_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_OCTETCOUNT_GB));
+	stats->rxoctetcount_g += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_OCTETCOUNT_G));
+	stats->rxbroadcastpackets_g += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_BROADCASTFRAME_G));
+	stats->rxmulticastpackets_g += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_MULTICASTFRAME_G));
+	stats->rxcrcerror += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_CRC_ERROR));
+	stats->rxalignmenterror += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_ALIGN_ERROR));
+	stats->rxrunterror += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_RUN_ERROR));
+	stats->rxjabbererror += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_JABBER_ERROR));
+	stats->rxundersize_g += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_UNDERSIZE_G));
+	stats->rxoversize_g += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_OVERSIZE_G));
+	stats->rx64octets_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_64_OCTETS_GB));
+	stats->rx65to127octets_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_65_TO_127_OCTETS_GB));
+	stats->rx128to255octets_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_128_TO_255_OCTETS_GB));
+	stats->rx256to511octets_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_256_TO_511_OCTETS_GB));
+	stats->rx512to1023octets_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_512_TO_1023_OCTETS_GB));
+	stats->rx1024tomaxoctets_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_1024_TO_MAX_OCTETS_GB));
+	stats->rxunicastpackets_g += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_UNICAST_G));
+	stats->rxlengtherror += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_LENGTH_ERROR));
+	stats->rxoutofrangetype += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_AUTOFRANGETYPE));
+	stats->rxpausepackets += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_PAUSE_FRAMES));
+	stats->rxfifooverflow += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_FIFO_OVERFLOW));
+	stats->rxvlanpackets_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_VLAN_FRAMES_GB));
+	stats->rxwatchdogerror += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_WATCHDOG_ERROR));
+
+	stats->rxipcintr += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_IPC_INTR));
+
+	stats->rxipv4_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_IPV4_GD));
+	stats->rxipv4_hderr += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_IPV4_HDERR));
+	stats->rxipv4_nopay += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_IPV4_NOPAY));
+	stats->rxipv4_frag += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_IPV4_FRAG));
+	stats->rxipv4_udsbl += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_IPV4_UDSBL));
+	stats->rxipv4_gb_octets += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_IPV4_GD_OCTETS));
+	stats->rxipv4_hderr_octets += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_IPV4_HDERR_OCTETS));
+	stats->rxipv4_nopay_octets += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_IPV4_NOPAY_OCTETS));
+	stats->rxipv4_frag_octets += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_IPV4_FRAG_OCTETS));
+	stats->rxipv4_udsbl_octets += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_IPV4_UDSBL_OCTETS));
+
+	stats->rxipv6_gb_octets += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_IPV6_GD_OCTETS));
+	stats->rxipv6_hderr_octets += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_IPV6_HDERR_OCTETS));
+	stats->rxipv6_nopay_octets += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_IPV6_NOPAY_OCTETS));
+	stats->rxipv6_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_IPV6_GD));
+	stats->rxipv6_hderr += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_IPV6_HDERR));
+	stats->rxipv6_nopay += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_IPV6_NOPAY));
+
+	stats->rxudp_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_UDP_GD));
+	stats->rxudp_err += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_UDP_ERR));
+	stats->rxtcp_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_TCP_GD));
+	stats->rxtcp_err += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_TCP_ERR));
+	stats->rxicmp_gb += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_ICMP_GD));
+	stats->rxicmp_err += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_ICMP_ERR));
+	stats->rxudp_gb_octets += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_UDP_GD_OCTETS));
+	stats->rxudp_err_octets += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_UDP_ERR_OCTETS));
+	stats->rxtcp_gb_octets += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_TCP_GD_OCTETS));
+	stats->rxtcp_err_octets += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_TCP_ERR_OCTETS));
+	stats->rxicmp_gb_octets += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_ICMP_GD_OCTETS));
+	stats->rxicmp_err_octets += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_ICMP_ERR_OCTETS));
+	stats->txfpefragmentcntr += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_FPE_FRAG));
+	stats->txholdreqcntr += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_TX_HOLD_REQ));
+	stats->rxpacketassemblyerrcntr += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_PKT_ASSEMBLY_ERR));
+	stats->rxpacketsmderrcntr += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_PKT_SMD_ERR));
+	stats->rxpacketassemblyokcntr += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_PKT_ASSEMBLY_OK));
+	stats->rxfpefragmentcntr += rte_le_to_cpu_32(
+		rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MMC_RX_FPE_FRAG));
+}
+
+static int
+t2h_eqos_xstats_get(struct rte_eth_dev *dev, struct rte_eth_xstat *xstats, unsigned int n)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+	unsigned int i;
+
+	if (n < T2H_EQOS_XSTATS_COUNT) {
+		return T2H_EQOS_XSTATS_COUNT;
+	}
+
+	/* MMC registers are configured for reset on read */
+	t2h_eqos_read_mmc_stats(priv);
+
+	for (i = 0; i < T2H_EQOS_XSTATS_COUNT; i++) {
+		xstats[i].id	= i;
+		xstats[i].value = *(uint64_t *)((uint8_t *)&priv->mmc_stats +
+						t2h_eqos_xstats_strings[i].offset);
+	}
+
+	return T2H_EQOS_XSTATS_COUNT;
+}
+
+static int
+t2h_eqos_xstats_get_by_id(struct rte_eth_dev *dev, const uint64_t *ids, uint64_t *values,
+			  unsigned int n)
+{
+	unsigned int i;
+	uint64_t values_copy[T2H_EQOS_XSTATS_COUNT];
+
+	if (!ids) {
+		struct renesas_t2h_private *priv = dev->data->dev_private;
+		if (n < T2H_EQOS_XSTATS_COUNT) {
+			return T2H_EQOS_XSTATS_COUNT;
+		}
+
+		t2h_eqos_read_mmc_stats(priv);
+
+		for (i = 0; i < T2H_EQOS_XSTATS_COUNT; i++) {
+			values[i] = *(uint64_t *)((uint8_t *)&priv->mmc_stats +
+						  t2h_eqos_xstats_strings[i].offset);
+		}
+
+		return i;
+	}
+
+	t2h_eqos_xstats_get_by_id(dev, NULL, (void *)values_copy, T2H_EQOS_XSTATS_COUNT);
+
+	for (i = 0; i < n; i++) {
+		if (ids[i] >= T2H_EQOS_XSTATS_COUNT) {
+			T2H_EQOS_PMD_ERR("Get Xstats Count Error");
+			return -1;
+		}
+		values[i] = values_copy[ids[i]];
+	}
+
+	return n;
+}
+
+static int
+t2h_eqos_xstats_get_names(__rte_unused struct rte_eth_dev *dev,
+			  struct rte_eth_xstat_name *xstats_names, unsigned int n)
+{
+	unsigned int i;
+
+	if (n >= T2H_EQOS_XSTATS_COUNT && xstats_names) {
+		for (i = 0; i < T2H_EQOS_XSTATS_COUNT; ++i) {
+			snprintf(xstats_names[i].name, RTE_ETH_XSTATS_NAME_SIZE, "%s",
+				 t2h_eqos_xstats_strings[i].name);
+		}
+	}
+
+	return T2H_EQOS_XSTATS_COUNT;
+}
+
+static int
+t2h_eqos_xstats_get_names_by_id(struct rte_eth_dev *dev, const uint64_t *ids,
+				struct rte_eth_xstat_name *xstats_names, unsigned int size)
+{
+	struct rte_eth_xstat_name xstats_names_copy[T2H_EQOS_XSTATS_COUNT];
+	unsigned int i;
+
+	if (!ids)
+		return t2h_eqos_xstats_get_names(dev, xstats_names, size);
+
+	t2h_eqos_xstats_get_names(dev, xstats_names_copy, size);
+
+	for (i = 0; i < size; i++) {
+		if (ids[i] >= T2H_EQOS_XSTATS_COUNT) {
+			T2H_EQOS_PMD_ERR("id value isn't valid");
+			return -1;
+		}
+		strcpy(xstats_names[i].name, xstats_names_copy[ids[i]].name);
+	}
+
+	return size;
+}
+
+static int
+t2h_eqos_xstats_reset(struct rte_eth_dev *dev)
+{
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+	struct t2h_eqos_mmc_stats *stats = &priv->mmc_stats;
+
+	/* MMC registers are configured for reset on read */
+	t2h_eqos_read_mmc_stats(priv);
+
+	/* Reset stats */
+	memset(stats, 0, sizeof(*stats));
+
+	return 0;
+}
+
+static void
+t2h_eqos_rxq_info_get(struct rte_eth_dev *dev, uint16_t queue_id, struct rte_eth_rxq_info *qinfo)
+{
+	struct t2h_eqos_priv_rx_q *rxq;
+
+	rxq		   = dev->data->rx_queues[queue_id];
+	qinfo->mp	   = rxq->mb_pool;
+	qinfo->nb_desc	   = rxq->nb_rx_desc;
+	qinfo->queue_state = rxq->queue_state;
+}
+
+static void
+t2h_eqos_txq_info_get(struct rte_eth_dev *dev, uint16_t queue_id, struct rte_eth_txq_info *qinfo)
+{
+	struct t2h_eqos_priv_tx_q *txq;
+
+	txq		   = dev->data->tx_queues[queue_id];
+	qinfo->nb_desc	   = txq->nb_tx_desc;
+	qinfo->queue_state = txq->queue_state;
+}
+
 static const struct eth_dev_ops t2h_eqos_ops = {
 	.mtu_set		  = t2h_eqos_mtu_set,
 	.dev_configure		  = t2h_eqos_eth_configure,
@@ -1432,7 +2020,19 @@ static const struct eth_dev_ops t2h_eqos_ops = {
 	.set_mc_addr_list	  = t2h_eqos_set_mc_addr_list,
 	.vlan_filter_set	  = t2h_eqos_vlan_filter_set,
 	.vlan_offload_set	  = t2h_eqos_vlan_offload_set,
-	.link_update		  = t2h_eqos_eth_link_update};
+	.dev_infos_get		  = t2h_eqos_eth_info,
+	.get_reg		  = t2h_eqos_get_regs,
+	.link_update		  = t2h_eqos_eth_link_update,
+	.stats_get		  = t2h_eqos_stats_get,
+	.dev_supported_ptypes_get = t2h_eqos_supported_ptypes_get,
+	.stats_reset		  = t2h_eqos_stats_reset,
+	.xstats_get		  = t2h_eqos_xstats_get,
+	.xstats_get_by_id	  = t2h_eqos_xstats_get_by_id,
+	.xstats_get_names	  = t2h_eqos_xstats_get_names,
+	.xstats_get_names_by_id	  = t2h_eqos_xstats_get_names_by_id,
+	.xstats_reset		  = t2h_eqos_xstats_reset,
+	.rxq_info_get		  = t2h_eqos_rxq_info_get,
+	.txq_info_get		  = t2h_eqos_txq_info_get};
 
 static int
 t2h_eqos_eth_init(struct rte_eth_dev *dev)
