@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause
  * Copyright(c) 2010-2014 Intel Corporation.
  * Copyright 2014 6WIND S.A.
+ * Copyright(C) 2024 Renesas Electronics Corporation
  */
 
 #include <string.h>
@@ -19,6 +20,12 @@
 #include <rte_hexdump.h>
 #include <rte_errno.h>
 #include <rte_memcpy.h>
+
+#include <def_use_rz_cma.h>
+
+#if USE_RZ_CMA
+extern int rte_mempool_populate_rzcma(struct rte_mempool *mp);
+#endif
 
 /*
  * pktmbuf pool constructor, given as a callback function to
@@ -254,7 +261,11 @@ rte_pktmbuf_pool_create_by_ops(const char *name, unsigned int n,
 	}
 	rte_pktmbuf_pool_init(mp, &mbp_priv);
 
+#if USE_RZ_CMA
+	ret = rte_mempool_populate_rzcma(mp);
+#else
 	ret = rte_mempool_populate_default(mp);
+#endif
 	if (ret < 0) {
 		rte_mempool_free(mp);
 		rte_errno = -ret;

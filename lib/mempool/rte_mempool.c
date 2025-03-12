@@ -2,6 +2,7 @@
  * Copyright(c) 2010-2014 Intel Corporation.
  * Copyright(c) 2016 6WIND S.A.
  * Copyright(c) 2022 SmartShare Systems
+ * Copyright(C) 2024 Renesas Electronics Corporation
  */
 
 #include <stdbool.h>
@@ -30,6 +31,16 @@
 
 #include "mempool_trace.h"
 #include "rte_mempool.h"
+
+#ifndef USE_RZ_CMA
+#include "def_use_rz_cma.h"
+#endif
+
+#if USE_RZ_CMA
+extern char *t2h_malloc(size_t noOfBytes, unsigned long long *p_addr);
+extern void t2h_mempool_free(struct rte_mempool *mp);
+int rte_mempool_populate_rzcma(struct rte_mempool *mp);
+#endif
 
 TAILQ_HEAD(rte_mempool_list, rte_tailq_entry);
 
@@ -657,6 +668,54 @@ rte_mempool_memchunk_anon_free(struct rte_mempool_memhdr *memhdr,
 	rte_mem_unmap(opaque, size);
 }
 
+#if USE_RZ_CMA
+/* populate the mempool with cma mapping */
+int
+rte_mempool_populate_rzcma(struct rte_mempool *mp)
+{
+	ssize_t size;
+	int ret;
+	char *addr;
+	unsigned long long p_addr;
+
+	/* mempool is already populated, error */
+	if ((!STAILQ_EMPTY(&mp->mem_list)) || mp->nb_mem_chunks != 0) {
+		rte_errno = EINVAL;
+		return 0;
+	}
+
+	ret = mempool_ops_alloc_once(mp);
+	if (ret < 0) {
+		rte_errno = -ret;
+		return 0;
+	}
+
+	size = get_anon_size(mp);
+	if (size < 0) {
+		rte_errno = -size;
+		return 0;
+	}
+
+	addr = t2h_malloc( (size_t) size, &p_addr);
+
+//	ret = rte_mempool_populate_virt(mp, addr, size, rte_mem_page_size(),rte_mempool_memchunk_anon_free, addr);
+	ret = rte_mempool_populate_iova(mp, addr, (rte_iova_t)p_addr, size, rte_mempool_memchunk_anon_free,(void *) addr);
+	if (ret == 0) /* should not happen */
+		ret = -ENOBUFS;
+	if (ret < 0) {
+		rte_errno = -ret;
+		goto fail;
+	}
+
+	rte_mempool_trace_populate_anon(mp);
+	return mp->populated_size;
+
+ fail:
+	rte_mempool_free_memchunks(mp);
+	return 0;
+}
+#endif
+
 /* populate the mempool with an anonymous mapping */
 int
 rte_mempool_populate_anon(struct rte_mempool *mp)
@@ -739,6 +798,16 @@ rte_mempool_free(struct rte_mempool *mp)
 	rte_mempool_trace_free(mp);
 	rte_mempool_free_memchunks(mp);
 	rte_mempool_ops_free(mp);
+
+#if USE_RZ_CMA
+	// "T2H_MEMPOOL" : specifed by rte_pktmbuf_pool_create("name"....)
+	if(  !strcmp("T2H_MEMPOOL", mp->name)  )
+	{
+		t2h_mempool_free(mp);
+		return;
+	}
+#endif
+
 	rte_memzone_free(mp->mz);
 }
 

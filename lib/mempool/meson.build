@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright(c) 2017 Intel Corporation
+# Copyright(C) 2024 Renesas Electronics Corporation
 
 extra_flags = []
 
@@ -14,6 +15,7 @@ sources = files(
         'rte_mempool_ops.c',
         'rte_mempool_ops_default.c',
         'mempool_trace_points.c',
+        't2h_mem.c',
 )
 headers = files(
         'rte_mempool.h',
