@@ -7,7 +7,6 @@ if not is_linux
 endif
 
 cflags_options = [
-        '-DDEFAULT_SPEED=1000',
         '-DT2H_DEBUG=0'
 ]
 

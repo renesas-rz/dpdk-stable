@@ -27,6 +27,9 @@
 #define T2H_EQOS_MAC_HW_FEATURE1                0x0120
 #define T2H_EQOS_MAC_HW_FEATURE3                0x0128
 
+#define T2H_EQOS_MAC_MDIO_ADDR                  0x0200
+#define T2H_EQOS_MAC_MDIO_DATA                  0x0204
+
 #define T2H_EQOS_MAC_ADDR0_HI                   0x0300
 #define T2H_EQOS_MAC_ADDR0_LO                   0x0304
 #define T2H_EQOS_MAC_ADDR_HI(reg)               (T2H_EQOS_MAC_ADDR0_HI + reg * 8)
@@ -155,6 +158,10 @@
 #define T2H_EQOS_MMC_RX_PKT_SMD_ERR             0x08CC
 #define T2H_EQOS_MMC_RX_PKT_ASSEMBLY_OK         0x08D0
 #define T2H_EQOS_MMC_RX_FPE_FRAG                0x08D4
+
+#define T2H_EQOS_PHY_BMCR                       0x0000
+#define T2H_EQOS_PHY_AUTO_NEG                   0x0004
+#define T2H_EQOS_PHY_1000BASE_T                 0x0009
 
 #define T2H_EQOS_MAC_CONFIG_IPC                 BIT(27)
 #define T2H_EQOS_MAC_CONFIG_CST                 BIT(21)
@@ -299,5 +306,29 @@
 #define T2H_EQOS_RXQ_CTL3_PSRQ5_SHIFT           8
 #define T2H_EQOS_RXQ_CTL3_PSRQ6_SHIFT           16
 #define T2H_EQOS_RXQ_CTL3_PSRQ7_SHIFT           24
+
+#define T2H_EQOS_MDIO_ADDR_GOC_SHIFT            2
+#define T2H_EQOS_MDIO_ADDR_CSR_SHIFT            8
+#define T2H_EQOS_MDIO_ADDR_REG_SHIFT            16
+#define T2H_EQOS_MDIO_ADDR_PA_SHIFT             21
+#define T2H_EQOS_MDIO_ADDR_GOC_WRITE            (1 << T2H_EQOS_MDIO_ADDR_GOC_SHIFT)
+#define T2H_EQOS_MDIO_ADDR_GOC_READ             (3 << T2H_EQOS_MDIO_ADDR_GOC_SHIFT)
+#define T2H_EQOS_MDIO_ADDR_CSR_MASK             GENMASK(11, 8)
+#define T2H_EQOS_MDIO_ADDR_REG_MASK             GENMASK(20, 16)
+#define T2H_EQOS_MDIO_ADDR_PA_MASK              GENMASK(25, 21)
+#define T2H_EQOS_MDIO_DATA_GD_MASK              GENMASK(15, 0)
+
+#define T2H_EQOS_MDIO_ADDR_BUSY                 BIT(0)
+
+#define T2H_EQOS_PHY_BMCR_AUTONEG               BIT(12)
+#define T2H_EQOS_PHY_BMCR_RESTART_AUTONEG       BIT(9)
+
+#define T2H_EQOS_PHY_AUTO_NEG_100_FULL          BIT(8)
+#define T2H_EQOS_PHY_AUTO_NEG_100_HALF          BIT(7)
+#define T2H_EQOS_PHY_AUTO_NEG_10_FULL           BIT(6)
+#define T2H_EQOS_PHY_AUTO_NEG_10_HALF           BIT(5)
+
+#define T2H_EQOS_PHY_1000BASE_T_FULL            BIT(9)
+#define T2H_EQOS_PHY_1000BASE_T_HALF            BIT(8)
 
 #endif /* __T2H_REGS_H */

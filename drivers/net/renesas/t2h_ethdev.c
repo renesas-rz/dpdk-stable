@@ -357,16 +357,6 @@ t2h_eqos_core_init(struct renesas_t2h_private *priv)
 		rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_CONFIG));
 	value |= T2H_EQOS_MAC_CORE_INIT;
 	value |= T2H_EQOS_MAC_CONFIG_TE;
-#if DEFAULT_SPEED == T2H_EQOS_SPEED_100
-	T2H_EQOS_PMD_DEBUG("Current speed is 100 ");
-	value |= T2H_EQOS_MAC_CONFIG_FES | T2H_EQOS_MAC_CONFIG_PS;
-#elif DEFAULT_SPEED == T2H_EQOS_SPEED_10
-	T2H_EQOS_PMD_DEBUG("Current speed is 10 ");
-	value |= T2H_EQOS_MAC_CONFIG_PS;
-#else
-	T2H_EQOS_PMD_DEBUG("Current speed is 1000 ");
-#endif
-
 	value |= T2H_EQOS_MAC_CONFIG_DM;
 	T2H_EQOS_PMD_DEBUG("value = 0x%x flag_csum = 0x%x", value, priv->flag_csum);
 	value |= priv->flag_csum;
@@ -1102,6 +1092,150 @@ t2h_eqos_restart(struct rte_eth_dev *dev)
 }
 
 static int
+t2h_eqos_mdio_operation(struct renesas_t2h_private *priv, int addr, int reg, int type,
+			  uint32_t phydata)
+{
+	uint32_t data  = 0;
+	uint32_t val   = 0;
+	uint32_t value = T2H_EQOS_MDIO_ADDR_BUSY;
+	uint8_t try_counter = T2H_EQOS_DMA_RESET_TRY_COUNT;
+
+	value |= (addr << T2H_EQOS_MDIO_ADDR_PA_SHIFT)
+		   & T2H_EQOS_MDIO_ADDR_PA_MASK;
+	value |= (reg << T2H_EQOS_MDIO_ADDR_REG_SHIFT)
+		   & T2H_EQOS_MDIO_ADDR_REG_MASK;
+	value |= type;
+	value |= (T2H_EQOS_CLK_CSR << T2H_EQOS_MDIO_ADDR_CSR_SHIFT)
+		   & T2H_EQOS_MDIO_ADDR_CSR_MASK;
+
+	/* Wait (at most) 10ms for MDIO */
+	while (try_counter) {
+		val = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_MDIO_ADDR));
+		if (!(val & T2H_EQOS_MDIO_ADDR_BUSY))
+			break;
+		try_counter--;
+		T2H_EQOS_UDELAY(T2H_EQOS_MDIO_READ_DELAY_TIME);
+	}
+
+	if (0 == try_counter) {
+		T2H_EQOS_PMD_WARN("MDIO_ADDR: MDIO operation is not complete");
+		data = -EBUSY;
+		goto err_mido;
+	}
+
+	if (type == T2H_EQOS_MDIO_ADDR_GOC_WRITE) {
+			rte_write32(rte_cpu_to_le_32(phydata),
+			    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_MDIO_DATA);
+	}
+	rte_write32(rte_cpu_to_le_32(value),
+                    (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_MDIO_ADDR);
+
+	try_counter = T2H_EQOS_DMA_RESET_TRY_COUNT;
+	/* Wait (at most) 10ms for MDIO */
+	while (try_counter) {
+		val = rte_le_to_cpu_32(
+			rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_MDIO_ADDR));
+		if (!(val & T2H_EQOS_MDIO_ADDR_BUSY))
+			break;
+		try_counter--;
+		T2H_EQOS_UDELAY(T2H_EQOS_MDIO_READ_DELAY_TIME);
+	}
+
+	if (0 == try_counter) {
+		T2H_EQOS_PMD_WARN("MDIO_ADDR: MDIO operation is not complete");
+		data = -EBUSY;
+		goto err_mido;
+	}
+
+	if (type == T2H_EQOS_MDIO_ADDR_GOC_READ) {
+		/* Read data from MDIO DATA REG */
+		data = rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v +
+				  T2H_EQOS_MAC_MDIO_DATA)) & T2H_EQOS_MDIO_DATA_GD_MASK;
+	} else {
+		data = 0;
+	}
+
+err_mido:
+	return data;
+}
+
+static int
+t2h_eqos_phy_setup(struct rte_eth_dev *dev)
+{
+	uint32_t *speed;
+	uint16_t bmcr_value, bscr_value, auto_neg_value, b1000t_value;
+	int ret;
+	struct renesas_t2h_private *priv = dev->data->dev_private;
+	uint32_t value =
+		rte_le_to_cpu_32(rte_read32((uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_CONFIG));	
+
+	value &= ~T2H_EQOS_MAC_CONFIG_FES;
+	value &= ~T2H_EQOS_MAC_CONFIG_PS;
+	speed = &dev->data->dev_conf.link_speeds;
+	T2H_EQOS_PMD_DEBUG("dev->data->dev_conf.link_speeds = 0x%x", dev->data->dev_conf.link_speeds);
+
+	/* read Auto-Negotiation Advertisement 0x04 */
+	auto_neg_value = t2h_eqos_mdio_operation(priv, priv->phy_reg, T2H_EQOS_PHY_AUTO_NEG,
+						   T2H_EQOS_MDIO_ADDR_GOC_READ, 0);
+	T2H_EQOS_PMD_DEBUG("Auto-Negotiation Advert(04) value = %u", auto_neg_value);
+	/* read 1000BASE-T Control 0x09 */
+	b1000t_value = t2h_eqos_mdio_operation(priv, priv->phy_reg, T2H_EQOS_PHY_1000BASE_T,
+						   T2H_EQOS_MDIO_ADDR_GOC_READ, 0);
+	T2H_EQOS_PMD_DEBUG("1000BASE-T Control(09) value = %u", b1000t_value);
+	auto_neg_value &= ~(T2H_EQOS_PHY_AUTO_NEG_100_FULL | T2H_EQOS_PHY_AUTO_NEG_100_HALF
+			    | T2H_EQOS_PHY_AUTO_NEG_10_FULL | T2H_EQOS_PHY_AUTO_NEG_10_HALF);
+	b1000t_value &= ~(T2H_EQOS_PHY_1000BASE_T_HALF | T2H_EQOS_PHY_1000BASE_T_FULL);
+
+	if (*speed & RTE_ETH_LINK_SPEED_100M) {
+		auto_neg_value |= T2H_EQOS_PHY_AUTO_NEG_100_FULL;
+		value |= (T2H_EQOS_MAC_CONFIG_FES | T2H_EQOS_MAC_CONFIG_PS);
+	} else if (*speed & RTE_ETH_LINK_SPEED_100M_HD) {
+		auto_neg_value |= T2H_EQOS_PHY_AUTO_NEG_100_HALF;
+		value |= (T2H_EQOS_MAC_CONFIG_FES | T2H_EQOS_MAC_CONFIG_PS);
+	} else if (*speed & RTE_ETH_LINK_SPEED_10M_HD) {
+		auto_neg_value |= T2H_EQOS_PHY_AUTO_NEG_10_HALF;
+		value |= T2H_EQOS_MAC_CONFIG_PS;
+	} else if (*speed & RTE_ETH_LINK_SPEED_10M) {
+		auto_neg_value |= T2H_EQOS_PHY_AUTO_NEG_10_FULL;
+		value |= T2H_EQOS_MAC_CONFIG_PS;
+	} else {
+		b1000t_value |= (T2H_EQOS_PHY_1000BASE_T_FULL | T2H_EQOS_PHY_1000BASE_T_HALF);
+		auto_neg_value |= (T2H_EQOS_PHY_AUTO_NEG_100_FULL | T2H_EQOS_PHY_AUTO_NEG_100_HALF
+				| T2H_EQOS_PHY_AUTO_NEG_10_FULL | T2H_EQOS_PHY_AUTO_NEG_10_HALF);			
+	}
+
+	rte_write32(rte_cpu_to_le_32(value), (uint8_t *)priv->hw_baseaddr_v + T2H_EQOS_MAC_CONFIG);
+
+	ret = t2h_eqos_mdio_operation(priv, priv->phy_reg, T2H_EQOS_PHY_AUTO_NEG, 
+					   T2H_EQOS_MDIO_ADDR_GOC_WRITE, auto_neg_value);
+	if (ret < 0) {
+		T2H_EQOS_PMD_WARN("PHY Auto-Negotiation Advertisement Failure");
+		return ret;
+	}
+
+	ret = t2h_eqos_mdio_operation(priv, priv->phy_reg, T2H_EQOS_PHY_1000BASE_T, 
+					   T2H_EQOS_MDIO_ADDR_GOC_WRITE, b1000t_value);
+	if (ret < 0) {
+		T2H_EQOS_PMD_WARN("PHY Auto-Negotiation Advertisement Failure");
+		return ret;
+	}
+
+	bmcr_value = t2h_eqos_mdio_operation(priv, priv->phy_reg, T2H_EQOS_PHY_BMCR,
+						   T2H_EQOS_MDIO_ADDR_GOC_READ, 0);
+	T2H_EQOS_PMD_DEBUG("Mode Control(00) value = %u", bmcr_value);
+	bmcr_value |= (T2H_EQOS_PHY_BMCR_RESTART_AUTONEG | T2H_EQOS_PHY_BMCR_AUTONEG);
+	ret = t2h_eqos_mdio_operation(priv, priv->phy_reg, T2H_EQOS_PHY_BMCR, 
+					   T2H_EQOS_MDIO_ADDR_GOC_WRITE, bmcr_value);
+	if (ret < 0) {
+		T2H_EQOS_PMD_WARN("PHY Speed Setup Failure");
+		return ret;
+	}
+
+	return 0;
+}
+
+static int
 t2h_eqos_eth_start(struct rte_eth_dev *dev)
 {
 	uint16_t i;
@@ -1111,6 +1245,11 @@ t2h_eqos_eth_start(struct rte_eth_dev *dev)
 
 	ret = t2h_eqos_restart(dev);
 	if (ret < 0) {
+		return ret;
+	}
+
+	ret = t2h_eqos_phy_setup(dev);
+	if (ret) {
 		return ret;
 	}
 

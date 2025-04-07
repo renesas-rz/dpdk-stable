@@ -144,6 +144,7 @@
 
 #define T2H_EQOS_DMA_RESET_TRY_COUNT            100
 #define T2H_EQOS_DMA_RESET_DELAY_TIME           10000
+#define T2H_EQOS_MDIO_READ_DELAY_TIME           100
 
 #define T2H_EQOS_SPEED_100                      100
 #define T2H_EQOS_SPEED_10                       10
@@ -192,6 +193,7 @@
 #define T2H_EQOS_HW_FEAT1_FIFOSIZE_MASK         128
 
 #define T2H_EQOS_REG_WIDTH                      4
+#define T2H_EQOS_CLK_CSR                        5
 
 struct t2h_eqos_mmc_stats {
 
