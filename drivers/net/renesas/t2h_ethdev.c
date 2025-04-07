@@ -1145,6 +1145,7 @@ t2h_eqos_eth_stop(struct rte_eth_dev *dev)
 	dev->data->dev_started = 0;
 
 	t2h_eqos_disable(priv, rx_num, tx_num);
+	t2h_eqos_disable_interrupts(dev);
 
 	for (i = 0; i < rx_num; i++)
 		dev->data->rx_queue_state[i] = RTE_ETH_QUEUE_STATE_STOPPED;
@@ -1159,7 +1160,6 @@ t2h_eqos_eth_close(struct rte_eth_dev *dev)
 {
 	struct renesas_t2h_private *priv = dev->data->dev_private;
 
-	t2h_eqos_disable_interrupts(dev);
 	t2h_eqos_free_all_queues(dev);
 
 	t2h_eqos_uio_cleanup(priv);
@@ -1809,7 +1809,8 @@ t2h_eqos_read_regs(struct renesas_t2h_private *priv, uint32_t *reg_buf)
 	}
 
 	for (i = 0; i < v_count; i++)
-		T2H_EQOS_PMD_INFO("address = 0x%x  value = 0x%x", reg_addr[i], reg_buf[i]);
+		T2H_EQOS_PMD_INFO("port id = %d address = 0x%x  value = 0x%x", 
+				              priv->dev->data->port_id, reg_addr[i], reg_buf[i]);
 
 	return v_count;
 }
@@ -1829,9 +1830,9 @@ t2h_get_desc(struct rte_eth_dev *dev)
 			des1 = rte_le_to_cpu_32(rte_read32(&p->des1));
 			des2 = rte_le_to_cpu_32(rte_read32(&p->des2));
 			des3 = rte_le_to_cpu_32(rte_read32(&p->des3));
-			T2H_EQOS_PMD_DEBUG("rx %d desc %03d : p = %p des0 = 0x%x, des1 "
-					   "= 0x%x, des2 = 0x%x, des3 = 0x%x",
-					   q_idx, i, p, des0, des1, des2, des3);
+			T2H_EQOS_PMD_DEBUG("port id %d rxq %d desc %03d : p = %p des0 = 0x%x, des1 "
+					        "= 0x%x, des2 = 0x%x, des3 = 0x%x",
+					        dev->data->port_id, q_idx, i, p, des0, des1, des2, des3);
 		}
 	}
 
@@ -1843,9 +1844,9 @@ t2h_get_desc(struct rte_eth_dev *dev)
 			des1 = rte_le_to_cpu_32(rte_read32(&p->des1));
 			des2 = rte_le_to_cpu_32(rte_read32(&p->des2));
 			des3 = rte_le_to_cpu_32(rte_read32(&p->des3));
-			T2H_EQOS_PMD_DEBUG("tx %d desc %03d : p = %p des0 = 0x%x, des1 "
-					   "= 0x%x, des2 = 0x%x, des3 = 0x%x",
-					   q_idx, i, p, des0, des1, des2, des3);
+			T2H_EQOS_PMD_DEBUG("port id %d txq %d desc %03d : p = %p des0 = 0x%x, des1 "
+					        "= 0x%x, des2 = 0x%x, des3 = 0x%x",
+					        dev->data->port_id, q_idx, i, p, des0, des1, des2, des3);
 		}
 	}
 }
@@ -2317,6 +2318,8 @@ pmd_t2h_eqos_probe(struct rte_vdev_device *vdev)
 	void *addr_v;
 	uint32_t addr_p;
 	uint32_t version;
+	uint32_t devname_length;
+	char last_char;
 
 	name = rte_vdev_device_name(vdev);
 	T2H_EQOS_PMD_INFO("Probe device name: %s", name);
@@ -2325,6 +2328,17 @@ pmd_t2h_eqos_probe(struct rte_vdev_device *vdev)
 	if (dev == NULL) {
 		T2H_EQOS_PMD_ERR("Failed to allocate mem %d to store MAC addresses",
 				 RTE_ETHER_ADDR_LEN);
+		return -ENOMEM;
+	}
+
+	devname_length = strlen(name);
+	if (devname_length == 0 || name == NULL) {
+		T2H_EQOS_PMD_ERR("Device Name is NULL");
+		return -ENOMEM;
+	}
+	last_char = name[devname_length - 1];
+	if (!isdigit(last_char)) {
+		T2H_EQOS_PMD_ERR("Device Name Error");
 		return -ENOMEM;
 	}
 
@@ -2339,10 +2353,12 @@ pmd_t2h_eqos_probe(struct rte_vdev_device *vdev)
 	priv	  = dev->data->dev_private;
 	priv->dev = dev;
 
+	priv->phy_reg = last_char - '0';
+
 	priv->max_rx_queues = T2H_EQOS_MAX_Q;
 	priv->max_tx_queues = T2H_EQOS_MAX_Q;
 
-	ret = t2h_eqos_uio_configure();
+	ret = t2h_eqos_uio_configure(priv->phy_reg);
 	if (ret != 0) {
 		T2H_EQOS_PMD_ERR("UIO configure error: %d", ret);
 		return -ENOMEM;

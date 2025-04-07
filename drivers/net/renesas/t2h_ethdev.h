@@ -319,6 +319,7 @@ struct renesas_t2h_private {
 	uint32_t promisc;
 	uint32_t flag_csum;
 	uint32_t version_id;
+	uint32_t phy_reg;
 };
 
 struct t2h_eqos_xstats {

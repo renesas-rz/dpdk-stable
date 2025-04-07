@@ -50,7 +50,7 @@ struct t2h_uio_job {
 	int uio_minor_number;
 };
 
-int t2h_eqos_uio_configure(void);
+int t2h_eqos_uio_configure(uint32_t reg_id);
 int config_t2h_eqos_uio(struct renesas_t2h_private *priv);
 void t2h_eqos_uio_init(void);
 void t2h_eqos_uio_cleanup(struct renesas_t2h_private *priv);

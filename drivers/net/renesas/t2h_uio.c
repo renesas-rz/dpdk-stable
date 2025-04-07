@@ -146,12 +146,6 @@ config_t2h_eqos_uio(struct renesas_t2h_private *priv)
 	char uio_device_file_name[T2H_EQOS_MAX_NAME_LENGTH];
 	struct t2h_uio_job *uio_job = NULL;
 
-	/* Mapping is done only one time */
-	if (renesas_t2h_count > 0) {
-		T2H_EQOS_PMD_WARN("Already mapped!");
-		return 0;
-	}
-
 	uio_job = &renesas_t2h_uio_job;
 
 	/* Find UIO device created by T2H-UIO kernel driver */
@@ -201,13 +195,20 @@ config_t2h_eqos_uio(struct renesas_t2h_private *priv)
 }
 
 int
-t2h_eqos_uio_configure(void)
+t2h_eqos_uio_configure(uint32_t reg_id)
 {
 	char uio_name[T2H_EQOS_MAX_DEVICE_FILE_NAME_LENGTH + 1];
 	int uio_minor_number = -1;
 	int ret;
 	DIR *d = NULL;
 	struct dirent *dir;
+	char port_name[T2H_EQOS_MAX_DEVICE_FILE_NAME_LENGTH + 1];
+	int len;
+
+	snprintf(port_name, sizeof(port_name) - 1, "%s-%d", T2H_EQOS_DEVICE_NAME,
+			reg_id);
+
+	T2H_EQOS_PMD_DEBUG("port_name = %s", port_name);
 
 	d = opendir(T2H_UIO_DEVICE_SYS_ATTR_PATH);
 	if (d == NULL) {
@@ -239,15 +240,19 @@ t2h_eqos_uio_configure(void)
 				closedir(d);
 				return -1;
 			}
+			len = strlen(uio_name);
+			if (uio_name[len - 1] == '\n' || uio_name[len - 1] == '\r')
+				uio_name[len - 1] = '\0';
 
-			if (file_name_match_extract(uio_name, T2H_EQOS_DEVICE_NAME)) {
+			if (file_name_match_extract(uio_name, port_name)) {
 				renesas_t2h_uio_job.uio_minor_number = uio_minor_number;
+				return 0;
 			}
 		}
 	}
 
 	closedir(d);
-	return 0;
+	return -ENOENT;
 }
 
 void
@@ -256,6 +261,6 @@ t2h_eqos_uio_cleanup(struct renesas_t2h_private *priv)
 	munmap(priv->hw_baseaddr_v, priv->reg_size);
 	munmap(priv->bd_addr_v, priv->bd_size);
 
-	close(renesas_t2h_uio_job.uio_fd);
+	close(priv->uio_fd);
 	T2H_EQOS_PMD_DEBUG("munmap success");
 }
